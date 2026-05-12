@@ -1,0 +1,38 @@
+{
+  "name": "eloydb (Java 26 + Maven)",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "customizations": {
+    "jetbrains": {
+      "backend": "IntelliJ",
+      "plugins": [
+        "CheckStyle-IDEA",
+        "com.google.googlejavaformat",
+        "Lombook Plugin"
+      ],
+      "settings": {
+        "com.intellij:app:GeneralSettings.autoSaveIfInactive": true
+      }
+    },
+    "vscode": {
+      "extensions": [
+        "vscjava.vscode-java-pack",
+        "vscjava.vscode-maven"
+      ]
+    }
+  },
+  "containerEnv": {
+    "JAVA_HOME": "/opt/java/openjdk",
+    "MAVEN_OPTS": "-Xmx2g"
+  },
+  "mounts": [
+    "source=eloydb-m2,target=/home/vscode/.m2,type=volume"
+  ],
+  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.m2 && mvn -B -ntp dependency:go-offline || true",
+  "remoteUser": "vscode"
+}
