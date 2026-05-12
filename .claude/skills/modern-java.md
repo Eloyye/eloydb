@@ -1,0 +1,1 @@
+../../skills/modern-java/SKILL.md
