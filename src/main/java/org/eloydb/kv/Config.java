@@ -14,10 +14,8 @@ import java.time.Duration;
  * @param checkpointWalBytes WAL bytes that can accumulate before checkpointing
  * @param maxSnapshotAge maximum usable age for an open snapshot
  * @param reclaimerInterval background page-reclaimer cadence
- *
- * <p>Example:
- *
- * <pre>{@code
+ *     <p>Example:
+ *     <pre>{@code
  * Config config = Config.defaults().withMaxSnapshotAge(Duration.ofMinutes(10));
  * try (KvEngine engine = KvEngine.open(path, config)) {
  *   // use engine

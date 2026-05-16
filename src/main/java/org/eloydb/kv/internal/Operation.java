@@ -1,9 +1,9 @@
-package org.eloydb.kv;
+package org.eloydb.kv.internal;
 
 import java.util.Arrays;
 
-final class Operation {
-  enum Kind {
+public final class Operation {
+  public enum Kind {
     PUT,
     DELETE
   }
@@ -18,31 +18,31 @@ final class Operation {
     this.value = Arrays.copyOf(value, value.length);
   }
 
-  static Operation put(byte[] key, byte[] value) {
+  public static Operation put(byte[] key, byte[] value) {
     return new Operation(Kind.PUT, key, value);
   }
 
-  static Operation delete(byte[] key) {
+  public static Operation delete(byte[] key) {
     return new Operation(Kind.DELETE, key, new byte[0]);
   }
 
-  Kind kind() {
+  public Kind kind() {
     return kind;
   }
 
-  byte[] key() {
+  public byte[] key() {
     return Arrays.copyOf(key, key.length);
   }
 
-  byte[] value() {
+  public byte[] value() {
     return Arrays.copyOf(value, value.length);
   }
 
-  byte[] unsafeKey() {
+  public byte[] unsafeKey() {
     return key;
   }
 
-  byte[] unsafeValue() {
+  public byte[] unsafeValue() {
     return value;
   }
 }

@@ -1,10 +1,10 @@
-package org.eloydb.kv;
+package org.eloydb.kv.internal;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 
-final class Bytes implements Comparable<Bytes> {
-  static final Bytes EMPTY = new Bytes(new byte[0]);
+public final class Bytes implements Comparable<Bytes> {
+  public static final Bytes EMPTY = new Bytes(new byte[0]);
 
   private final byte[] value;
 
@@ -12,23 +12,23 @@ final class Bytes implements Comparable<Bytes> {
     this.value = value;
   }
 
-  static Bytes copyOf(byte[] value) {
+  public static Bytes copyOf(byte[] value) {
     return value.length == 0 ? EMPTY : new Bytes(Arrays.copyOf(value, value.length));
   }
 
-  byte[] copy() {
+  public byte[] copy() {
     return Arrays.copyOf(value, value.length);
   }
 
-  ByteBuffer asReadOnlyBuffer() {
+  public ByteBuffer asReadOnlyBuffer() {
     return ByteBuffer.wrap(value).asReadOnlyBuffer();
   }
 
-  int length() {
+  public int length() {
     return value.length;
   }
 
-  byte[] unsafeArray() {
+  public byte[] unsafeArray() {
     return value;
   }
 

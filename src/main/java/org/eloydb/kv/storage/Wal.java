@@ -1,4 +1,4 @@
-package org.eloydb.kv;
+package org.eloydb.kv.storage;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -13,9 +13,15 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.TreeMap;
 import java.util.zip.CRC32C;
+import org.eloydb.kv.CommitResult;
+import org.eloydb.kv.ErrorCode;
+import org.eloydb.kv.KvException;
+import org.eloydb.kv.Metrics;
+import org.eloydb.kv.internal.Bytes;
+import org.eloydb.kv.internal.Operation;
 
 @SuppressWarnings("NonApiType")
-final class Wal implements AutoCloseable {
+public final class Wal implements AutoCloseable {
   private static final int MAGIC = 0x454c5741;
   private static final int HEADER_BYTES = Integer.BYTES + Integer.BYTES + Byte.BYTES + Long.BYTES;
   private static final int CRC_BYTES = Integer.BYTES;
@@ -33,7 +39,7 @@ final class Wal implements AutoCloseable {
     this.metrics = metrics;
   }
 
-  static Wal open(Path directory, Metrics metrics) {
+  public static Wal open(Path directory, Metrics metrics) {
     try {
       Files.createDirectories(directory);
       Path path = directory.resolve("wal.000001");
@@ -45,7 +51,7 @@ final class Wal implements AutoCloseable {
     }
   }
 
-  RecoveryResult recover() {
+  public RecoveryResult recover() {
     var committed = new TreeMap<Bytes, byte[]>();
     var pending = new java.util.HashMap<Long, List<Operation>>();
     long lastGoodPosition = 0;
@@ -85,7 +91,7 @@ final class Wal implements AutoCloseable {
     }
   }
 
-  CommitResult appendCommitted(long txId, long commitTs, List<Operation> operations) {
+  public CommitResult appendCommitted(long txId, long commitTs, List<Operation> operations) {
     try {
       for (Operation operation : operations) {
         appendOperation(txId, operation);
@@ -218,7 +224,8 @@ final class Wal implements AutoCloseable {
     }
   }
 
-  record RecoveryResult(TreeMap<Bytes, byte[]> map, long recoveredWalPosition, long commitTs) {}
+  public record RecoveryResult(
+      TreeMap<Bytes, byte[]> map, long recoveredWalPosition, long commitTs) {}
 
   private static final class WalRecord {
     private final byte type;

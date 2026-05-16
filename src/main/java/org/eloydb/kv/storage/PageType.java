@@ -1,4 +1,7 @@
-package org.eloydb.kv;
+package org.eloydb.kv.storage;
+
+import org.eloydb.kv.ErrorCode;
+import org.eloydb.kv.KvException;
 
 /** M1 page type tag. */
 public enum PageType {

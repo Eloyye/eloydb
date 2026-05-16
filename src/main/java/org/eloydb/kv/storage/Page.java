@@ -1,4 +1,4 @@
-package org.eloydb.kv;
+package org.eloydb.kv.storage;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;

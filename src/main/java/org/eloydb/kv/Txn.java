@@ -22,7 +22,9 @@ public interface Txn extends AutoCloseable {
 
   void delete(byte[] key);
 
-  /** Scans through this transaction's pending writes over {@code [startInclusive, endExclusive)}. */
+  /**
+   * Scans through this transaction's pending writes over {@code [startInclusive, endExclusive)}.
+   */
   Cursor scan(byte[] startInclusive, byte[] endExclusive);
 
   /** Returns a stable read view that includes this transaction's pending writes. */

@@ -2,7 +2,6 @@ package org.eloydb.kv;
 
 import java.nio.file.Path;
 import java.time.Clock;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -10,6 +9,12 @@ import java.util.Optional;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.eloydb.kv.engine.Cursors;
+import org.eloydb.kv.engine.EngineSnapshot;
+import org.eloydb.kv.engine.WriteTxn;
+import org.eloydb.kv.internal.Bytes;
+import org.eloydb.kv.internal.Operation;
+import org.eloydb.kv.storage.Wal;
 
 /**
  * Embeddable EloyDB key-value engine.
@@ -76,7 +81,9 @@ public final class KvEngine implements AutoCloseable {
     return new KvEngine(config, clock, wal, recoveryResult, metrics);
   }
 
-  /** Starts the only active writer; callers must commit, abort, or close the returned transaction. */
+  /**
+   * Starts the only active writer; callers must commit, abort, or close the returned transaction.
+   */
   public synchronized Txn beginWrite() {
     ensureOpen();
     if (writerActive) {
@@ -104,7 +111,7 @@ public final class KvEngine implements AutoCloseable {
   /** Scans committed keys in unsigned byte order over {@code [startInclusive, endExclusive)}. */
   public synchronized Cursor scan(byte[] startInclusive, byte[] endExclusive) {
     ensureOpen();
-    return cursorFor(committed, Bytes.copyOf(startInclusive), Bytes.copyOf(endExclusive));
+    return Cursors.forMap(committed, Bytes.copyOf(startInclusive), Bytes.copyOf(endExclusive));
   }
 
   /** Returns the engine's in-process metrics registry. */
@@ -125,7 +132,7 @@ public final class KvEngine implements AutoCloseable {
     }
   }
 
-  synchronized Optional<byte[]> transactionGet(WriteTxn txn, byte[] key) {
+  public synchronized Optional<byte[]> transactionGet(WriteTxn txn, byte[] key) {
     ensureWriter(txn);
     Bytes wrapped = Bytes.copyOf(key);
     Operation operation = txn.latestOperation(wrapped);
@@ -138,16 +145,17 @@ public final class KvEngine implements AutoCloseable {
     return value == null ? Optional.empty() : Optional.of(Arrays.copyOf(value, value.length));
   }
 
-  synchronized Cursor transactionScan(WriteTxn txn, byte[] startInclusive, byte[] endExclusive) {
+  public synchronized Cursor transactionScan(
+      WriteTxn txn, byte[] startInclusive, byte[] endExclusive) {
     ensureWriter(txn);
     TreeMap<Bytes, byte[]> overlay = copyCommitted();
     for (Operation operation : txn.operations()) {
       apply(overlay, operation);
     }
-    return cursorFor(overlay, Bytes.copyOf(startInclusive), Bytes.copyOf(endExclusive));
+    return Cursors.forMap(overlay, Bytes.copyOf(startInclusive), Bytes.copyOf(endExclusive));
   }
 
-  synchronized Snapshot transactionSnapshot(WriteTxn txn) {
+  public synchronized Snapshot transactionSnapshot(WriteTxn txn) {
     ensureWriter(txn);
     TreeMap<Bytes, byte[]> overlay = copyCommitted();
     for (Operation operation : txn.operations()) {
@@ -157,7 +165,7 @@ public final class KvEngine implements AutoCloseable {
     return new EngineSnapshot(commitTs, config, clock, overlay, liveSnapshots::decrementAndGet);
   }
 
-  synchronized CommitResult commit(WriteTxn txn) {
+  public synchronized CommitResult commit(WriteTxn txn) {
     ensureWriter(txn);
     List<Operation> operations = txn.operations();
     long newCommitTs = commitTs + 1;
@@ -171,21 +179,9 @@ public final class KvEngine implements AutoCloseable {
     return result;
   }
 
-  synchronized void abort(WriteTxn txn) {
+  public synchronized void abort(WriteTxn txn) {
     ensureWriter(txn);
     writerActive = false;
-  }
-
-  static Cursor cursorFor(TreeMap<Bytes, byte[]> map, Bytes startInclusive, Bytes endExclusive) {
-    if (startInclusive.compareTo(endExclusive) > 0) {
-      throw new KvException(ErrorCode.INVALID_ARGUMENT, "scan start must be <= end");
-    }
-    List<KeyValue> rows = new ArrayList<>();
-    for (Map.Entry<Bytes, byte[]> entry :
-        map.subMap(startInclusive, true, endExclusive, false).entrySet()) {
-      rows.add(new KeyValue(entry.getKey().copy(), entry.getValue()));
-    }
-    return new ListCursor(rows);
   }
 
   private void ensureOpen() {

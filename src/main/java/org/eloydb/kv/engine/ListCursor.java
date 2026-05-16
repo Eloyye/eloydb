@@ -1,13 +1,15 @@
-package org.eloydb.kv;
+package org.eloydb.kv.engine;
 
 import java.util.List;
+import org.eloydb.kv.Cursor;
+import org.eloydb.kv.KeyValue;
 
-final class ListCursor implements Cursor {
+public final class ListCursor implements Cursor {
   private final List<KeyValue> rows;
   private int index = -1;
   private boolean closed;
 
-  ListCursor(List<KeyValue> rows) {
+  public ListCursor(List<KeyValue> rows) {
     this.rows = List.copyOf(rows);
   }
 

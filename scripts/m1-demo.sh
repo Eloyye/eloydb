@@ -10,9 +10,9 @@ fi
 
 mvn -q -DskipTests compile
 
-java -cp target/classes org.eloydb.kv.EloydbKv "$STORE" init
-java -cp target/classes org.eloydb.kv.EloydbKv "$STORE" put user:1 alice
-java -cp target/classes org.eloydb.kv.EloydbKv "$STORE" put user:2 bob
-java -cp target/classes org.eloydb.kv.EloydbKv "$STORE" scan "user:" "user;"
-java -cp target/classes org.eloydb.kv.EloydbKv "$STORE" snapshot
-java -cp target/classes org.eloydb.kv.EloydbKv "$STORE" verify
+java -cp target/classes org.eloydb.kv.cli.EloydbKv "$STORE" init
+java -cp target/classes org.eloydb.kv.cli.EloydbKv "$STORE" put user:1 alice
+java -cp target/classes org.eloydb.kv.cli.EloydbKv "$STORE" put user:2 bob
+java -cp target/classes org.eloydb.kv.cli.EloydbKv "$STORE" scan "user:" "user;"
+java -cp target/classes org.eloydb.kv.cli.EloydbKv "$STORE" snapshot
+java -cp target/classes org.eloydb.kv.cli.EloydbKv "$STORE" verify

@@ -1,13 +1,19 @@
-package org.eloydb.kv;
+package org.eloydb.kv.cli;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import org.eloydb.kv.Config;
+import org.eloydb.kv.Cursor;
+import org.eloydb.kv.KeyValue;
+import org.eloydb.kv.KvEngine;
+import org.eloydb.kv.Snapshot;
+import org.eloydb.kv.Txn;
 
 /** Command-line harness for manual M1 KV exploration. */
 public final class EloydbKv {
   private EloydbKv() {}
 
-  static void main (String[] args) {
+  static void main(String[] args) {
     if (args.length < 2) {
       usage();
       return;

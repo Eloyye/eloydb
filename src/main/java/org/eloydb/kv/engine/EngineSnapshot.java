@@ -1,4 +1,4 @@
-package org.eloydb.kv;
+package org.eloydb.kv.engine;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -6,9 +6,15 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.eloydb.kv.Config;
+import org.eloydb.kv.Cursor;
+import org.eloydb.kv.ErrorCode;
+import org.eloydb.kv.KvException;
+import org.eloydb.kv.Snapshot;
+import org.eloydb.kv.internal.Bytes;
 
 @SuppressWarnings("NonApiType")
-final class EngineSnapshot implements Snapshot {
+public final class EngineSnapshot implements Snapshot {
   private final long commitTs;
   private final Instant openedAt;
   private final Config config;
@@ -17,7 +23,7 @@ final class EngineSnapshot implements Snapshot {
   private final Runnable onClose;
   private final AtomicBoolean closed = new AtomicBoolean();
 
-  EngineSnapshot(
+  public EngineSnapshot(
       long commitTs, Config config, Clock clock, TreeMap<Bytes, byte[]> source, Runnable onClose) {
     this.commitTs = commitTs;
     this.config = config;
@@ -45,7 +51,7 @@ final class EngineSnapshot implements Snapshot {
   @Override
   public Cursor scan(byte[] startInclusive, byte[] endExclusive) {
     ensureUsable();
-    return KvEngine.cursorFor(view, Bytes.copyOf(startInclusive), Bytes.copyOf(endExclusive));
+    return Cursors.forMap(view, Bytes.copyOf(startInclusive), Bytes.copyOf(endExclusive));
   }
 
   @Override
