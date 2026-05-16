@@ -1,7 +1,7 @@
 interface:
   display_name: "Modern Java"
-  short_description: "Apply modern Java and JUnit best practices."
-  default_prompt: "Use $modern-java to write, review, refactor, or test Java code with modern stable Java and JUnit practices."
+  short_description: "Apply modern Java, Javadoc, and JUnit best practices."
+  default_prompt: "Use $modern-java to write, review, refactor, document, or test Java code with modern stable Java, concise Javadoc, and JUnit practices."
 
 policy:
   allow_implicit_invocation: true

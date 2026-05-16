@@ -1,6 +1,6 @@
 ---
 name: modern-java
-description: Apply modern Java and JUnit best practices when writing, reviewing, or refactoring Java code. Use this skill whenever the user writes Java, asks for a Java code review, modernizes legacy Java, designs Java APIs, or writes JVM tests, even when they do not explicitly say "best practices." Trigger on records, sealed types, pattern matching, virtual threads, HttpClient, JUnit, Mockito, AssertJ, or any `.java` file content.
+description: Apply modern Java, Javadoc, and JUnit best practices when writing, reviewing, or refactoring Java code. Use this skill whenever the user writes Java, asks for a Java code review, modernizes legacy Java, designs Java APIs, documents Java APIs, or writes JVM tests, even when they do not explicitly say "best practices." Trigger on records, sealed types, pattern matching, virtual threads, HttpClient, Javadoc, JUnit, Mockito, AssertJ, or any `.java` file content.
 ---
 
 # Modern Java Best Practices
@@ -197,7 +197,7 @@ HttpRequest request = HttpRequest.newBuilder(URI.create("https://example.com"))
 
 ## Documentation
 
-Use Markdown Javadoc when the target Java version supports it.
+Write informative, concise Javadoc for public and protected APIs, package-level contracts, and non-obvious extension points. Prefer Markdown Javadoc when the target Java version supports it.
 
 ```java
 /// Returns the discounted price.
@@ -207,7 +207,20 @@ Use Markdown Javadoc when the target Java version supports it.
 Money discounted(Order order);
 ```
 
-Document contracts, nullability, threading, exceptions, and side effects. Do not document obvious implementation details.
+Good Javadoc:
+
+- Starts with a short third-person summary sentence that explains the contract, not the implementation.
+- Adds detail only when it changes how callers should use the API: valid ranges, ownership, mutability, ordering, blocking behavior, nullability, threading, idempotency, side effects, and resource lifecycle.
+- Uses `@param`, `@return`, `@throws`, `@implSpec`, `@apiNote`, and `@see` when they add useful caller or implementor information.
+- Includes a minimal usage example for public APIs that are easy to misuse or are central to the library.
+- Stays synchronized with the code; update Javadoc when changing signatures, behavior, exceptions, or default values.
+
+Avoid Javadoc that:
+
+- Repeats the method name or obvious type information, such as "Gets the value."
+- Describes private implementation details instead of observable behavior.
+- Documents every trivial getter, setter, record accessor, or test helper unless the contract is surprising.
+- Promises timing, allocation, thread safety, or exception behavior the implementation does not guarantee.
 
 ## Tooling
 
@@ -351,6 +364,7 @@ await().atMost(2, SECONDS).until(() -> queue.size() == 5);
 Before finishing Java work, confirm:
 
 - Stable Java APIs were preferred.
+- Public and protected APIs have concise, accurate Javadoc where the contract is not obvious.
 - Data models, nullability, immutability, and exceptions make illegal states hard to represent.
 - Tests use current JUnit Jupiter conventions.
 - Relevant formatting, compilation, tests, and static checks ran, or blockers were reported explicitly.
