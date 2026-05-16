@@ -20,12 +20,12 @@ If formatting violations are found, report them and offer to auto-fix with `mvn 
 
 ### 2. Static Analysis (Error Prone + NullAway + Checkstyle)
 
-Run compilation with Error Prone and NullAway:
+Run the Maven verification lifecycle. This includes compilation with Error Prone and NullAway, Google Checkstyle, and the package nullness policy requiring `package-info.java` files marked with `@NullMarked`:
 ```bash
-mvn compile
+mvn verify
 ```
 
-Then run Checkstyle:
+For a direct Google Checkstyle-only run:
 ```bash
 mvn checkstyle:check
 ```
