@@ -1,82 +1,82 @@
 package org.eloydb.kv.cli;
 
+import org.eloydb.kv.*;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import org.eloydb.kv.*;
+import java.util.Arrays;
 
 /** Command-line harness for manual M1 KV exploration. */
 public final class EloydbKvCLI {
   private EloydbKvCLI() {}
 
   public static void main(String[] args) {
+    execute(args, new EloydbKvRenderer(System.out));
+  }
+
+  static void execute(String[] args, EloydbKvRenderer renderer) {
     if (args.length < 2) {
-      usage();
+      renderer.usage();
       return;
     }
 
     Path directory = Path.of(args[0]);
-    String command = args[1];
+    Command command = Command.from(args[1]);
+    if (command == Command.UNKNOWN) {
+      renderer.usage();
+      return;
+    }
+    requireArgs(args, command.minArgs(), renderer);
+
     try (KeyValueEngine engine = KeyValueEngine.open(directory, Config.defaults())) {
       switch (command) {
-        case "init" -> System.out.println("initialized " + directory);
-        case "put" -> {
-          requireArgs(args, 4);
+        case INIT -> renderer.initialized(directory);
+        case PUT -> {
           try (Transaction txn = engine.beginWrite()) {
             txn.put(bytes(args[2]), bytes(args[3]));
             txn.commit();
           }
-          System.out.println("ok");
+          renderer.ok();
         }
-        case "get" -> {
-          requireArgs(args, 3);
-          System.out.println(engine.get(bytes(args[2])).map(EloydbKvCLI::text).orElse("(missing)"));
-        }
-        case "delete" -> {
-          requireArgs(args, 3);
+        case GET -> renderer.value(engine.get(bytes(args[2])).map(EloydbKvCLI::text));
+        case DELETE -> {
           try (Transaction txn = engine.beginWrite()) {
             txn.delete(bytes(args[2]));
             txn.commit();
           }
-          System.out.println("ok");
+          renderer.ok();
         }
-        case "scan" -> {
-          requireArgs(args, 4);
+        case SCAN -> {
           try (Cursor cursor = engine.scan(bytes(args[2]), bytes(args[3]))) {
             while (cursor.next()) {
               KeyValue row = cursor.current();
-              System.out.println(text(row.key()) + "\t" + text(row.value()));
+              renderer.row(text(row.key()), text(row.value()));
             }
           }
         }
-        case "snapshot" -> {
+        case SNAPSHOT -> {
           try (Snapshot snapshot = engine.snapshot()) {
-            System.out.println("snapshot " + snapshot.commitTs());
+            renderer.snapshot(snapshot.commitTs());
           }
         }
-        case "stats" ->
-            engine
-                .metrics()
-                .snapshot()
-                .forEach((name, value) -> System.out.println(name + "=" + value));
-        case "verify" -> {
+        case STATS -> engine.metrics().snapshot().forEach(renderer::metric);
+        case VERIFY -> {
           KeyValueEngine.VerifyResult result = engine.verify();
-          System.out.println(
-              "ok="
-                  + result.ok()
-                  + " keys="
-                  + result.keyCount()
-                  + " liveSnapshots="
-                  + result.liveSnapshots());
+          renderer.verify(result);
         }
-        default -> usage();
+        case UNKNOWN -> throw new AssertionError("unknown command already rejected");
       }
     }
   }
 
-  private static void requireArgs(String[] args, int count) {
+  private static void requireArgs(String[] args, int count, EloydbKvRenderer renderer) {
     if (args.length < count) {
-      usage();
-      throw new IllegalArgumentException("expected at least " + count + " arguments");
+      renderer.usage();
+      throw new IllegalArgumentException(
+          "expected at least "
+              + count
+              + " arguments for: "
+              + String.join(" ", Arrays.copyOf(args, args.length)));
     }
   }
 
@@ -87,19 +87,36 @@ public final class EloydbKvCLI {
   private static String text(byte[] value) {
     return new String(value, StandardCharsets.UTF_8);
   }
+  private enum Command {
+    INIT("init", 2),
+    PUT("put", 4),
+    GET("get", 3),
+    DELETE("delete", 3),
+    SCAN("scan", 4),
+    SNAPSHOT("snapshot", 2),
+    STATS("stats", 2),
+    VERIFY("verify", 2),
+    UNKNOWN("", 0);
 
-  private static void usage() {
-    System.out.println(
-        """
-        usage: eloydb-kv <dir> <command> [args]
-          init
-          put <key> <value>
-          get <key>
-          delete <key>
-          scan <start-inclusive> <end-exclusive>
-          snapshot
-          stats
-          verify
-        """);
+    private final String token;
+    private final int minArgs;
+
+    Command(String token, int minArgs) {
+      this.token = token;
+      this.minArgs = minArgs;
+    }
+
+    int minArgs() {
+      return minArgs;
+    }
+
+    static Command from(String token) {
+      for (Command command : values()) {
+        if (command.token.equals(token)) {
+          return command;
+        }
+      }
+      return UNKNOWN;
+    }
   }
 }
