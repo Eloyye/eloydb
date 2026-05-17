@@ -1,10 +1,9 @@
 package org.eloydb.kv.cli;
 
-import org.eloydb.kv.*;
-
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Arrays;
+import org.eloydb.kv.*;
 
 /** Command-line harness for manual M1 KV exploration. */
 public final class EloydbKvCLI {
@@ -87,6 +86,7 @@ public final class EloydbKvCLI {
   private static String text(byte[] value) {
     return new String(value, StandardCharsets.UTF_8);
   }
+
   private enum Command {
     INIT("init", 2),
     PUT("put", 4),
