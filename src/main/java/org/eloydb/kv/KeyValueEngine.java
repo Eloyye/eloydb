@@ -1,23 +1,20 @@
 package org.eloydb.kv;
 
-import java.nio.file.Path;
-import java.time.Clock;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.TreeMap;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.eloydb.kv.engine.Cursors;
 import org.eloydb.kv.engine.EngineSnapshot;
-import org.eloydb.kv.engine.WriteTxn;
+import org.eloydb.kv.engine.WriteTransaction;
 import org.eloydb.kv.internal.Bytes;
 import org.eloydb.kv.internal.Operation;
-import org.eloydb.kv.storage.Wal;
+import org.eloydb.kv.storage.WriteAheadLog;
+
+import java.nio.file.Path;
+import java.time.Clock;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Embeddable EloyDB key-value engine.
+ * Embeddable EloyDB key-v * Embeddable EloyDB key-value engine.alue engine.
  *
  * <p>Example:
  *
@@ -38,10 +35,10 @@ import org.eloydb.kv.storage.Wal;
  * }</pre>
  */
 @SuppressWarnings("NonApiType")
-public final class KvEngine implements AutoCloseable {
+public final class KeyValueEngine implements AutoCloseable {
   private final Config config;
   private final Clock clock;
-  private final Wal wal;
+  private final WriteAheadLog wal;
   private final Metrics metrics;
   private final TreeMap<Bytes, byte[]> committed;
   private final AtomicInteger liveSnapshots = new AtomicInteger();
@@ -51,14 +48,22 @@ public final class KvEngine implements AutoCloseable {
   private long commitTs;
   private boolean writerActive;
 
-  private KvEngine(
-      Config config, Clock clock, Wal wal, Wal.RecoveryResult recoveryResult, Metrics metrics) {
+  private KeyValueEngine(
+      Config config,
+      Clock clock,
+      WriteAheadLog wal,
+      WriteAheadLog.RecoveryResult recoveryResult,
+      Metrics metrics) {
     this.config = config;
     this.clock = clock;
     this.wal = wal;
     this.metrics = metrics;
     this.committed = recoveryResult.map();
     this.commitTs = recoveryResult.commitTs();
+    initKvEngineStartMetric(metrics);
+  }
+
+  private void initKvEngineStartMetric(Metrics metrics) {
     metrics.gauge("snapshots.live", () -> (long) liveSnapshots.get());
     metrics.gauge("tree.height", () -> committed.isEmpty() ? 0L : 1L);
     metrics.gauge("tree.pages_allocated", () -> Math.max(1L, committed.size()));
@@ -70,28 +75,28 @@ public final class KvEngine implements AutoCloseable {
   }
 
   /** Opens or creates an engine rooted at {@code directory}, replaying its WAL before returning. */
-  public static KvEngine open(Path directory, Config config) {
+  public static KeyValueEngine open(Path directory, Config config) {
     return open(directory, config, Clock.systemUTC());
   }
 
-  static KvEngine open(Path directory, Config config, Clock clock) {
-    Metrics metrics = new Metrics();
-    Wal wal = Wal.open(directory, metrics);
-    Wal.RecoveryResult recoveryResult = wal.recover();
-    return new KvEngine(config, clock, wal, recoveryResult, metrics);
+  static KeyValueEngine open(Path directory, Config config, Clock clock) {
+    var metrics = new Metrics();
+    var wal = WriteAheadLog.open(directory, metrics);
+    WriteAheadLog.RecoveryResult recoveryResult = wal.recover();
+    return new KeyValueEngine(config, clock, wal, recoveryResult, metrics);
   }
 
   /**
    * Starts the only active writer; callers must commit, abort, or close the returned transaction.
    */
-  public synchronized Txn beginWrite() {
+  public synchronized Transaction beginWrite() {
     ensureOpen();
     if (writerActive) {
       throw new KvException(
           ErrorCode.INSUFFICIENT_RESOURCES, "a write transaction is already active");
     }
     writerActive = true;
-    return new WriteTxn(this, nextTxId++, committed);
+    return new WriteTransaction(this, nextTxId++, committed);
   }
 
   /** Returns a stable read view at the current commit timestamp. */
@@ -132,7 +137,7 @@ public final class KvEngine implements AutoCloseable {
     }
   }
 
-  public synchronized Optional<byte[]> transactionGet(WriteTxn txn, byte[] key) {
+  public synchronized Optional<byte[]> transactionGet(WriteTransaction txn, byte[] key) {
     ensureWriter(txn);
     Bytes wrapped = Bytes.copyOf(key);
     Operation operation = txn.latestOperation(wrapped);
@@ -146,40 +151,35 @@ public final class KvEngine implements AutoCloseable {
   }
 
   public synchronized Cursor transactionScan(
-      WriteTxn txn, byte[] startInclusive, byte[] endExclusive) {
+      WriteTransaction txn, byte[] startInclusive, byte[] endExclusive) {
     ensureWriter(txn);
     TreeMap<Bytes, byte[]> overlay = copyCommitted();
-    for (Operation operation : txn.operations()) {
-      apply(overlay, operation);
-    }
+    txn.operations().forEach(operation -> apply(overlay, operation));
     return Cursors.forMap(overlay, Bytes.copyOf(startInclusive), Bytes.copyOf(endExclusive));
   }
 
-  public synchronized Snapshot transactionSnapshot(WriteTxn txn) {
+  public synchronized Snapshot transactionSnapshot(WriteTransaction txn) {
     ensureWriter(txn);
     TreeMap<Bytes, byte[]> overlay = copyCommitted();
-    for (Operation operation : txn.operations()) {
-      apply(overlay, operation);
-    }
+    txn.operations().forEach(operation -> apply(overlay, operation));
     liveSnapshots.incrementAndGet();
     return new EngineSnapshot(commitTs, config, clock, overlay, liveSnapshots::decrementAndGet);
   }
 
-  public synchronized CommitResult commit(WriteTxn txn) {
+  public synchronized CommitResult commit(WriteTransaction txn) {
     ensureWriter(txn);
     List<Operation> operations = txn.operations();
     long newCommitTs = commitTs + 1;
     CommitResult result = wal.appendCommitted(txn.txId(), newCommitTs, operations);
-    for (Operation operation : operations) {
-      apply(committed, operation);
-    }
+    operations.forEach
+            (operation -> apply(committed, operation));
     commitTs = newCommitTs;
     writerActive = false;
     metrics.add("tree.pages_allocated", operations.size());
     return result;
   }
 
-  public synchronized void abort(WriteTxn txn) {
+  public synchronized void abort(WriteTransaction txn) {
     ensureWriter(txn);
     writerActive = false;
   }
@@ -190,7 +190,7 @@ public final class KvEngine implements AutoCloseable {
     }
   }
 
-  private void ensureWriter(WriteTxn txn) {
+  private void ensureWriter(WriteTransaction txn) {
     ensureOpen();
     if (!writerActive || !txn.isOpen()) {
       throw new IllegalStateException("transaction is not active");
@@ -199,9 +199,7 @@ public final class KvEngine implements AutoCloseable {
 
   private TreeMap<Bytes, byte[]> copyCommitted() {
     var copy = new TreeMap<Bytes, byte[]>();
-    for (Map.Entry<Bytes, byte[]> entry : committed.entrySet()) {
-      copy.put(entry.getKey(), Arrays.copyOf(entry.getValue(), entry.getValue().length));
-    }
+    committed.forEach((key, value) -> copy.put(key, Arrays.copyOf(value, value.length)));
     return copy;
   }
 
@@ -210,9 +208,9 @@ public final class KvEngine implements AutoCloseable {
       map.put(
           Bytes.copyOf(operation.unsafeKey()),
           Arrays.copyOf(operation.unsafeValue(), operation.unsafeValue().length));
-    } else {
-      map.remove(Bytes.copyOf(operation.unsafeKey()));
+      return;
     }
+    map.remove(Bytes.copyOf(operation.unsafeKey()));
   }
 
   public record VerifyResult(long keyCount, long liveSnapshots, boolean ok) {}

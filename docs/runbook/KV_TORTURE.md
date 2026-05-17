@@ -11,11 +11,11 @@ mvn test
 After packaging, run:
 
 ```bash
-java -cp target/classes org.eloydb.kv.cli.EloydbKv /tmp/eloydb init
-java -cp target/classes org.eloydb.kv.cli.EloydbKv /tmp/eloydb put hello world
-java -cp target/classes org.eloydb.kv.cli.EloydbKv /tmp/eloydb get hello
-java -cp target/classes org.eloydb.kv.cli.EloydbKv /tmp/eloydb scan h i
-java -cp target/classes org.eloydb.kv.cli.EloydbKv /tmp/eloydb verify
+java -cp target/classes org.eloydb.kv.cli.EloydbKvCLI /tmp/eloydb init
+java -cp target/classes org.eloydb.kv.cli.EloydbKvCLI /tmp/eloydb put hello world
+java -cp target/classes org.eloydb.kv.cli.EloydbKvCLI /tmp/eloydb get hello
+java -cp target/classes org.eloydb.kv.cli.EloydbKvCLI /tmp/eloydb scan h i
+java -cp target/classes org.eloydb.kv.cli.EloydbKvCLI /tmp/eloydb verify
 ```
 
 ## Crash-Recovery Check

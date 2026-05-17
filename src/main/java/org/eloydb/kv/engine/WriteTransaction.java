@@ -1,27 +1,24 @@
 package org.eloydb.kv.engine;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
-import java.util.TreeMap;
-import org.eloydb.kv.CommitResult;
-import org.eloydb.kv.Cursor;
-import org.eloydb.kv.KvEngine;
-import org.eloydb.kv.Snapshot;
-import org.eloydb.kv.Txn;
+import org.eloydb.kv.*;
 import org.eloydb.kv.internal.Bytes;
 import org.eloydb.kv.internal.Operation;
 import org.jspecify.annotations.Nullable;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.TreeMap;
+
 @SuppressWarnings("NonApiType")
-public final class WriteTxn implements Txn {
-  private final KvEngine engine;
+public final class WriteTransaction implements Transaction {
+  private final KeyValueEngine engine;
   private final long txId;
   private final ArrayList<Operation> operations = new ArrayList<>();
   private final TreeMap<Bytes, Operation> latestByKey = new TreeMap<>();
   private boolean open = true;
 
-  public WriteTxn(KvEngine engine, long txId, TreeMap<Bytes, byte[]> ignoredCommittedView) {
+  public WriteTransaction(KeyValueEngine engine, long txId, TreeMap<Bytes, byte[]> ignoredCommittedView) {
     this.engine = engine;
     this.txId = txId;
   }

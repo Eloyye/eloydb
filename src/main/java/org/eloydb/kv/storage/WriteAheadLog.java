@@ -1,5 +1,12 @@
 package org.eloydb.kv.storage;
 
+import org.eloydb.kv.CommitResult;
+import org.eloydb.kv.ErrorCode;
+import org.eloydb.kv.KvException;
+import org.eloydb.kv.Metrics;
+import org.eloydb.kv.internal.Bytes;
+import org.eloydb.kv.internal.Operation;
+
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -13,15 +20,9 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.TreeMap;
 import java.util.zip.CRC32C;
-import org.eloydb.kv.CommitResult;
-import org.eloydb.kv.ErrorCode;
-import org.eloydb.kv.KvException;
-import org.eloydb.kv.Metrics;
-import org.eloydb.kv.internal.Bytes;
-import org.eloydb.kv.internal.Operation;
 
 @SuppressWarnings("NonApiType")
-public final class Wal implements AutoCloseable {
+public final class WriteAheadLog implements AutoCloseable {
   private static final int MAGIC = 0x454c5741;
   private static final int HEADER_BYTES = Integer.BYTES + Integer.BYTES + Byte.BYTES + Long.BYTES;
   private static final int CRC_BYTES = Integer.BYTES;
@@ -33,19 +34,19 @@ public final class Wal implements AutoCloseable {
   private final FileChannel channel;
   private final Metrics metrics;
 
-  private Wal(Path path, FileChannel channel, Metrics metrics) {
+  private WriteAheadLog(Path path, FileChannel channel, Metrics metrics) {
     this.path = path;
     this.channel = channel;
     this.metrics = metrics;
   }
 
-  public static Wal open(Path directory, Metrics metrics) {
+  public static WriteAheadLog open(Path directory, Metrics metrics) {
     try {
       Files.createDirectories(directory);
       Path path = directory.resolve("wal.000001");
       var options =
           EnumSet.of(StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
-      return new Wal(path, FileChannel.open(path, options), metrics);
+      return new WriteAheadLog(path, FileChannel.open(path, options), metrics);
     } catch (IOException e) {
       throw new KvException(ErrorCode.IO_ERROR, "cannot open WAL in " + directory, e);
     }

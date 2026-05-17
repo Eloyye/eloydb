@@ -14,7 +14,7 @@ import java.util.Optional;
  * }
  * }</pre>
  */
-public interface Txn extends AutoCloseable {
+public interface Transaction extends AutoCloseable {
   /** Reads through this transaction, including its uncommitted writes. */
   Optional<byte[]> get(byte[] key);
 

@@ -1,17 +1,13 @@
 package org.eloydb.kv.cli;
 
+import org.eloydb.kv.*;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import org.eloydb.kv.Config;
-import org.eloydb.kv.Cursor;
-import org.eloydb.kv.KeyValue;
-import org.eloydb.kv.KvEngine;
-import org.eloydb.kv.Snapshot;
-import org.eloydb.kv.Txn;
 
 /** Command-line harness for manual M1 KV exploration. */
-public final class EloydbKv {
-  private EloydbKv() {}
+public final class EloydbKvCLI {
+  private EloydbKvCLI() {}
 
   static void main(String[] args) {
     if (args.length < 2) {
@@ -21,12 +17,12 @@ public final class EloydbKv {
 
     Path directory = Path.of(args[0]);
     String command = args[1];
-    try (KvEngine engine = KvEngine.open(directory, Config.defaults())) {
+    try (KeyValueEngine engine = KeyValueEngine.open(directory, Config.defaults())) {
       switch (command) {
         case "init" -> System.out.println("initialized " + directory);
         case "put" -> {
           requireArgs(args, 4);
-          try (Txn txn = engine.beginWrite()) {
+          try (Transaction txn = engine.beginWrite()) {
             txn.put(bytes(args[2]), bytes(args[3]));
             txn.commit();
           }
@@ -34,11 +30,11 @@ public final class EloydbKv {
         }
         case "get" -> {
           requireArgs(args, 3);
-          System.out.println(engine.get(bytes(args[2])).map(EloydbKv::text).orElse("(missing)"));
+          System.out.println(engine.get(bytes(args[2])).map(EloydbKvCLI::text).orElse("(missing)"));
         }
         case "delete" -> {
           requireArgs(args, 3);
-          try (Txn txn = engine.beginWrite()) {
+          try (Transaction txn = engine.beginWrite()) {
             txn.delete(bytes(args[2]));
             txn.commit();
           }
@@ -64,7 +60,7 @@ public final class EloydbKv {
                 .snapshot()
                 .forEach((name, value) -> System.out.println(name + "=" + value));
         case "verify" -> {
-          KvEngine.VerifyResult result = engine.verify();
+          KeyValueEngine.VerifyResult result = engine.verify();
           System.out.println(
               "ok="
                   + result.ok()

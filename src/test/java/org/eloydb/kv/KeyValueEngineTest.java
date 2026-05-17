@@ -21,13 +21,13 @@ import org.eloydb.kv.storage.PageType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-final class KvEngineTest {
+final class KeyValueEngineTest {
   @TempDir private java.nio.file.Path tempDir;
 
   @Test
   void putGetDeleteScanAndRecover() {
-    try (KvEngine engine = KvEngine.open(tempDir, Config.defaults())) {
-      try (Txn txn = engine.beginWrite()) {
+    try (KeyValueEngine engine = KeyValueEngine.open(tempDir, Config.defaults())) {
+      try (Transaction txn = engine.beginWrite()) {
         txn.put(bytes("b"), bytes("2"));
         txn.put(bytes("a"), bytes("1"));
         txn.put(bytes("c"), bytes("3"));
@@ -40,7 +40,7 @@ final class KvEngineTest {
       assertThat(scanKeys(engine, "a", "z")).containsExactly("a", "c");
     }
 
-    try (KvEngine recovered = KvEngine.open(tempDir, Config.defaults())) {
+    try (KeyValueEngine recovered = KeyValueEngine.open(tempDir, Config.defaults())) {
       assertThat(recovered.get(bytes("a"))).contains(bytes("1"));
       assertThat(recovered.get(bytes("b"))).isEmpty();
       assertThat(scanKeys(recovered, "a", "z")).containsExactly("a", "c");
@@ -52,14 +52,14 @@ final class KvEngineTest {
 
   @Test
   void snapshotKeepsStableViewAfterWrites() {
-    try (KvEngine engine = KvEngine.open(tempDir, Config.defaults())) {
-      try (Txn txn = engine.beginWrite()) {
+    try (KeyValueEngine engine = KeyValueEngine.open(tempDir, Config.defaults())) {
+      try (Transaction txn = engine.beginWrite()) {
         txn.put(bytes("key"), bytes("v1"));
         txn.commit();
       }
 
       try (Snapshot snapshot = engine.snapshot()) {
-        try (Txn txn = engine.beginWrite()) {
+        try (Transaction txn = engine.beginWrite()) {
           txn.put(bytes("key"), bytes("v2"));
           txn.commit();
         }
@@ -74,8 +74,8 @@ final class KvEngineTest {
   void oldSnapshotFailsAfterConfiguredAge() {
     MutableClock clock = new MutableClock();
     Config config = Config.defaults().withMaxSnapshotAge(Duration.ofSeconds(1));
-    try (KvEngine engine = KvEngine.open(tempDir, config, clock);
-        Snapshot snapshot = engine.snapshot()) {
+    try (KeyValueEngine engine = KeyValueEngine.open(tempDir, config, clock);
+         Snapshot snapshot = engine.snapshot()) {
       clock.advance(Duration.ofSeconds(2));
       assertThatThrownBy(() -> snapshot.get(bytes("x")))
           .isInstanceOf(KvException.class)
@@ -89,19 +89,19 @@ final class KvEngineTest {
     Random random = new Random(1);
     TreeMap<String, String> oracle = new TreeMap<>();
 
-    try (KvEngine engine = KvEngine.open(tempDir, Config.defaults())) {
+    try (KeyValueEngine engine = KeyValueEngine.open(tempDir, Config.defaults())) {
       for (int i = 0; i < 10_000; i++) {
         String key = "k" + random.nextInt(200);
         int op = random.nextInt(4);
         if (op == 0) {
-          try (Txn txn = engine.beginWrite()) {
+          try (Transaction txn = engine.beginWrite()) {
             txn.delete(bytes(key));
             txn.commit();
           }
           oracle.remove(key);
         } else {
           String value = "v" + random.nextInt(1_000_000);
-          try (Txn txn = engine.beginWrite()) {
+          try (Transaction txn = engine.beginWrite()) {
             txn.put(bytes(key), bytes(value));
             txn.commit();
           }
@@ -145,7 +145,7 @@ final class KvEngineTest {
     }
   }
 
-  private static List<String> scanKeys(KvEngine engine, String start, String end) {
+  private static List<String> scanKeys(KeyValueEngine engine, String start, String end) {
     var keys = new ArrayList<String>();
     try (Cursor cursor = engine.scan(bytes(start), bytes(end))) {
       while (cursor.next()) {
