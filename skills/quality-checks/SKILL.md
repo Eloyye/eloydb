@@ -9,14 +9,19 @@ Run the full suite of code quality checks for this Java project. Execute each st
 
 ## Steps
 
-### 1. Formatting Check (Spotless + google-java-format)
+### 1. Apply Formatting (Spotless + google-java-format)
 
 Run:
 ```bash
-mvn spotless:check
+mvn spotless:apply
 ```
 
-If formatting violations are found, report them and offer to auto-fix with `mvn spotless:apply`.
+This step must be run before the remaining checks so formatting violations are fixed in place.
+
+Then verify formatting:
+```bash
+mvn spotless:check
+```
 
 ### 2. Static Analysis (Error Prone + NullAway + Checkstyle)
 
@@ -53,7 +58,7 @@ After all steps, provide a summary:
 ```
 Quality Check Results
 ─────────────────────
-Formatting:      ✓ PASS / ✗ FAIL (N violations)
+Formatting:      ✓ APPLIED + PASS / ✗ FAIL (N violations)
 Static Analysis: ✓ PASS / ✗ FAIL (N errors, M warnings)
 Checkstyle:      ✓ PASS / ✗ FAIL (N violations)
 Tests:           ✓ PASS / ✗ FAIL (N/M passed) / ⊘ SKIPPED (no tests)
