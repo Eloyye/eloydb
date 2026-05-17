@@ -1,7 +1,7 @@
 package org.eloydb.kv;
 
 /** Base exception for EloyDB KV failures. */
-public final class KvException extends RuntimeException {
+public class KvException extends RuntimeException {
   private final ErrorCode errorCode;
 
   public KvException(ErrorCode errorCode, String message) {

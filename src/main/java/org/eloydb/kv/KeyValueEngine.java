@@ -2,25 +2,28 @@ package org.eloydb.kv;
 
 import org.eloydb.kv.engine.Cursors;
 import org.eloydb.kv.engine.EngineSnapshot;
-import org.eloydb.kv.engine.WriteTransaction;
 import org.eloydb.kv.internal.Bytes;
 import org.eloydb.kv.internal.Operation;
 import org.eloydb.kv.storage.WriteAheadLog;
 
 import java.nio.file.Path;
 import java.time.Clock;
-import java.util.*;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Embeddable EloyDB key-v * Embeddable EloyDB key-value engine.alue engine.
+ * Embeddable EloyDB key-value engine.
  *
  * <p>Example:
  *
  * <pre>{@code
- * try (KvEngine engine = KvEngine.open(Path.of("/var/lib/eloydb"), Config.defaults())) {
- *   try (Txn txn = engine.beginWrite()) {
+ * try (KeyValueEngine engine =
+ *     KeyValueEngine.open(Path.of("/var/lib/eloydb"), Config.defaults())) {
+ *   try (Transaction txn = engine.beginWrite()) {
  *     txn.put("hello".getBytes(UTF_8), "world".getBytes(UTF_8));
  *     txn.commit();
  *   }
@@ -96,7 +99,7 @@ public final class KeyValueEngine implements AutoCloseable {
           ErrorCode.INSUFFICIENT_RESOURCES, "a write transaction is already active");
     }
     writerActive = true;
-    return new WriteTransaction(this, nextTxId++, committed);
+    return new WriteTransaction(this, nextTxId++);
   }
 
   /** Returns a stable read view at the current commit timestamp. */
@@ -127,7 +130,7 @@ public final class KeyValueEngine implements AutoCloseable {
   /** Performs lightweight consistency checks over the current in-memory state. */
   public VerifyResult verify() {
     ensureOpen();
-    return new VerifyResult(committed.size(), liveSnapshots.get(), true);
+    return new VerifyResult(committed.size(), liveSnapshots.get(), wal.verify().ok());
   }
 
   @Override
@@ -137,7 +140,7 @@ public final class KeyValueEngine implements AutoCloseable {
     }
   }
 
-  public synchronized Optional<byte[]> transactionGet(WriteTransaction txn, byte[] key) {
+  synchronized Optional<byte[]> transactionGet(WriteTransaction txn, byte[] key) {
     ensureWriter(txn);
     Bytes wrapped = Bytes.copyOf(key);
     Operation operation = txn.latestOperation(wrapped);
@@ -150,7 +153,7 @@ public final class KeyValueEngine implements AutoCloseable {
     return value == null ? Optional.empty() : Optional.of(Arrays.copyOf(value, value.length));
   }
 
-  public synchronized Cursor transactionScan(
+  synchronized Cursor transactionScan(
       WriteTransaction txn, byte[] startInclusive, byte[] endExclusive) {
     ensureWriter(txn);
     TreeMap<Bytes, byte[]> overlay = copyCommitted();
@@ -158,7 +161,7 @@ public final class KeyValueEngine implements AutoCloseable {
     return Cursors.forMap(overlay, Bytes.copyOf(startInclusive), Bytes.copyOf(endExclusive));
   }
 
-  public synchronized Snapshot transactionSnapshot(WriteTransaction txn) {
+  synchronized Snapshot transactionSnapshot(WriteTransaction txn) {
     ensureWriter(txn);
     TreeMap<Bytes, byte[]> overlay = copyCommitted();
     txn.operations().forEach(operation -> apply(overlay, operation));
@@ -166,20 +169,18 @@ public final class KeyValueEngine implements AutoCloseable {
     return new EngineSnapshot(commitTs, config, clock, overlay, liveSnapshots::decrementAndGet);
   }
 
-  public synchronized CommitResult commit(WriteTransaction txn) {
+  synchronized CommitResult commit(WriteTransaction txn) {
     ensureWriter(txn);
     List<Operation> operations = txn.operations();
     long newCommitTs = commitTs + 1;
     CommitResult result = wal.appendCommitted(txn.txId(), newCommitTs, operations);
-    operations.forEach
-            (operation -> apply(committed, operation));
+    operations.forEach(operation -> apply(committed, operation));
     commitTs = newCommitTs;
     writerActive = false;
-    metrics.add("tree.pages_allocated", operations.size());
     return result;
   }
 
-  public synchronized void abort(WriteTransaction txn) {
+  synchronized void abort(WriteTransaction txn) {
     ensureWriter(txn);
     writerActive = false;
   }

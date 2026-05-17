@@ -1,12 +1,5 @@
 package org.eloydb.kv.storage;
 
-import org.eloydb.kv.CommitResult;
-import org.eloydb.kv.ErrorCode;
-import org.eloydb.kv.KvException;
-import org.eloydb.kv.Metrics;
-import org.eloydb.kv.internal.Bytes;
-import org.eloydb.kv.internal.Operation;
-
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -20,6 +13,12 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.TreeMap;
 import java.util.zip.CRC32C;
+import org.eloydb.kv.CommitResult;
+import org.eloydb.kv.ErrorCode;
+import org.eloydb.kv.KvException;
+import org.eloydb.kv.Metrics;
+import org.eloydb.kv.internal.Bytes;
+import org.eloydb.kv.internal.Operation;
 
 @SuppressWarnings("NonApiType")
 public final class WriteAheadLog implements AutoCloseable {
@@ -70,8 +69,8 @@ public final class WriteAheadLog implements AutoCloseable {
               for (Operation operation : operations) {
                 apply(committed, operation);
               }
-              recoveredCommitTs = record.commitTs();
             }
+            recoveredCommitTs = record.commitTs();
           } else {
             pending
                 .computeIfAbsent(record.txId, ignored -> new ArrayList<>())
@@ -81,8 +80,9 @@ public final class WriteAheadLog implements AutoCloseable {
           truncateIfNeeded(reader.size(), lastGoodPosition);
           positionForAppend(lastGoodPosition);
           return new RecoveryResult(committed, recordStart, recoveredCommitTs);
-        } catch (KvException e) {
+        } catch (TornWalTailException e) {
           truncateIfNeeded(reader.size(), lastGoodPosition);
+          metrics.increment("wal.torn_tail_truncations");
           positionForAppend(lastGoodPosition);
           return new RecoveryResult(committed, lastGoodPosition, recoveredCommitTs);
         }
@@ -103,6 +103,20 @@ public final class WriteAheadLog implements AutoCloseable {
       return new CommitResult(commitTs, channel.position(), operations.size());
     } catch (IOException e) {
       throw new KvException(ErrorCode.IO_ERROR, "cannot append WAL transaction", e);
+    }
+  }
+
+  public VerificationResult verify() {
+    try (FileChannel reader = FileChannel.open(path, StandardOpenOption.READ)) {
+      while (true) {
+        try {
+          readRecord(reader);
+        } catch (EOFException e) {
+          return new VerificationResult(true);
+        }
+      }
+    } catch (IOException | KvException e) {
+      return new VerificationResult(false);
     }
   }
 
@@ -154,22 +168,24 @@ public final class WriteAheadLog implements AutoCloseable {
 
   private WalRecord readRecord(FileChannel reader) throws IOException {
     ByteBuffer header = ByteBuffer.allocate(HEADER_BYTES).order(ByteOrder.BIG_ENDIAN);
-    readFully(reader, header);
+    long recordStart = reader.position();
+    readFully(reader, header, true);
     header.flip();
     int magic = header.getInt();
     if (magic != MAGIC) {
-      throw new KvException(ErrorCode.IO_ERROR, "invalid WAL record magic at " + reader.position());
+      throw new KvException(ErrorCode.CORRUPTED_PAGE, "invalid WAL record magic at " + recordStart);
     }
     int payloadLength = header.getInt();
     if (payloadLength < 0 || payloadLength > 128 * 1024 * 1024) {
-      throw new KvException(ErrorCode.IO_ERROR, "invalid WAL payload length " + payloadLength);
+      throw new KvException(
+          ErrorCode.CORRUPTED_PAGE, "invalid WAL payload length " + payloadLength);
     }
     byte type = header.get();
     long txId = header.getLong();
 
     ByteBuffer payloadAndCrc =
         ByteBuffer.allocate(payloadLength + CRC_BYTES).order(ByteOrder.BIG_ENDIAN);
-    readFully(reader, payloadAndCrc);
+    readFully(reader, payloadAndCrc, false);
     payloadAndCrc.flip();
 
     CRC32C crc = new CRC32C();
@@ -177,7 +193,7 @@ public final class WriteAheadLog implements AutoCloseable {
     crc.update(payloadAndCrc.array(), 0, payloadLength);
     int expected = payloadAndCrc.getInt(payloadLength);
     if ((int) crc.getValue() != expected) {
-      throw new KvException(ErrorCode.IO_ERROR, "WAL CRC mismatch");
+      throw new KvException(ErrorCode.CORRUPTED_PAGE, "WAL CRC mismatch at " + recordStart);
     }
 
     byte[] payload = new byte[payloadLength];
@@ -185,14 +201,15 @@ public final class WriteAheadLog implements AutoCloseable {
     return new WalRecord(type, txId, payload);
   }
 
-  private static void readFully(FileChannel reader, ByteBuffer buffer) throws IOException {
+  private static void readFully(FileChannel reader, ByteBuffer buffer, boolean cleanEofAllowed)
+      throws IOException {
     while (buffer.hasRemaining()) {
       int read = reader.read(buffer);
       if (read < 0) {
-        if (buffer.position() == 0) {
+        if (cleanEofAllowed && buffer.position() == 0) {
           throw new EOFException();
         }
-        throw new KvException(ErrorCode.IO_ERROR, "torn WAL tail");
+        throw new TornWalTailException();
       }
     }
   }
@@ -227,6 +244,14 @@ public final class WriteAheadLog implements AutoCloseable {
 
   public record RecoveryResult(
       TreeMap<Bytes, byte[]> map, long recoveredWalPosition, long commitTs) {}
+
+  public record VerificationResult(boolean ok) {}
+
+  private static final class TornWalTailException extends IOException {
+    TornWalTailException() {
+      super("torn WAL tail");
+    }
+  }
 
   private static final class WalRecord {
     private final byte type;

@@ -1,41 +1,38 @@
-package org.eloydb.kv.engine;
-
-import org.eloydb.kv.*;
-import org.eloydb.kv.internal.Bytes;
-import org.eloydb.kv.internal.Operation;
-import org.jspecify.annotations.Nullable;
+package org.eloydb.kv;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.TreeMap;
+import org.eloydb.kv.internal.Bytes;
+import org.eloydb.kv.internal.Operation;
+import org.jspecify.annotations.Nullable;
 
-@SuppressWarnings("NonApiType")
-public final class WriteTransaction implements Transaction {
+final class WriteTransaction implements Transaction {
   private final KeyValueEngine engine;
   private final long txId;
   private final ArrayList<Operation> operations = new ArrayList<>();
   private final TreeMap<Bytes, Operation> latestByKey = new TreeMap<>();
   private boolean open = true;
 
-  public WriteTransaction(KeyValueEngine engine, long txId, TreeMap<Bytes, byte[]> ignoredCommittedView) {
+  WriteTransaction(KeyValueEngine engine, long txId) {
     this.engine = engine;
     this.txId = txId;
   }
 
-  public long txId() {
+  long txId() {
     return txId;
   }
 
-  public boolean isOpen() {
+  boolean isOpen() {
     return open;
   }
 
-  public List<Operation> operations() {
+  List<Operation> operations() {
     return List.copyOf(operations);
   }
 
-  public @Nullable Operation latestOperation(Bytes key) {
+  @Nullable Operation latestOperation(Bytes key) {
     return latestByKey.get(key);
   }
 

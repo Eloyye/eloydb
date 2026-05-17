@@ -5,6 +5,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.lang.foreign.Arena;
+import java.lang.reflect.Modifier;
+import java.nio.file.Files;
+import java.nio.file.StandardOpenOption;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -15,6 +18,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Random;
 import java.util.TreeMap;
+import org.eloydb.kv.cli.EloydbKvCLI;
 import org.eloydb.kv.storage.Page;
 import org.eloydb.kv.storage.PageCorruptedException;
 import org.eloydb.kv.storage.PageType;
@@ -51,6 +55,60 @@ final class KeyValueEngineTest {
   }
 
   @Test
+  void emptyCommitAdvancesTimestampAcrossRecovery() {
+    try (KeyValueEngine engine = KeyValueEngine.open(tempDir, Config.defaults())) {
+      try (Transaction txn = engine.beginWrite()) {
+        txn.commit();
+      }
+    }
+
+    try (KeyValueEngine recovered = KeyValueEngine.open(tempDir, Config.defaults());
+        Snapshot snapshot = recovered.snapshot()) {
+      assertThat(snapshot.commitTs()).isEqualTo(1);
+    }
+  }
+
+  @Test
+  void walCrcMismatchFailsRecovery() throws Exception {
+    try (KeyValueEngine engine = KeyValueEngine.open(tempDir, Config.defaults())) {
+      try (Transaction txn = engine.beginWrite()) {
+        txn.put(bytes("key"), bytes("value"));
+        txn.commit();
+      }
+    }
+
+    java.nio.file.Path wal = tempDir.resolve("wal.000001");
+    byte[] bytes = Files.readAllBytes(wal);
+    bytes[bytes.length / 2] ^= 0x01;
+    Files.write(wal, bytes, StandardOpenOption.TRUNCATE_EXISTING);
+
+    assertThatThrownBy(() -> KeyValueEngine.open(tempDir, Config.defaults()))
+        .isInstanceOf(KvException.class)
+        .extracting("errorCode")
+        .isEqualTo(ErrorCode.CORRUPTED_PAGE);
+  }
+
+  @Test
+  void tornWalTailIsTruncatedAndReported() throws Exception {
+    try (KeyValueEngine engine = KeyValueEngine.open(tempDir, Config.defaults())) {
+      try (Transaction txn = engine.beginWrite()) {
+        txn.put(bytes("key"), bytes("value"));
+        txn.commit();
+      }
+    }
+
+    java.nio.file.Path wal = tempDir.resolve("wal.000001");
+    long cleanSize = Files.size(wal);
+    Files.write(wal, new byte[] {0x45, 0x4c}, StandardOpenOption.APPEND);
+
+    try (KeyValueEngine recovered = KeyValueEngine.open(tempDir, Config.defaults())) {
+      assertThat(recovered.get(bytes("key"))).contains(bytes("value"));
+      assertThat(recovered.metrics().snapshot()).containsEntry("wal.torn_tail_truncations", 1L);
+    }
+    assertThat(Files.size(wal)).isEqualTo(cleanSize);
+  }
+
+  @Test
   void snapshotKeepsStableViewAfterWrites() {
     try (KeyValueEngine engine = KeyValueEngine.open(tempDir, Config.defaults())) {
       try (Transaction txn = engine.beginWrite()) {
@@ -75,7 +133,7 @@ final class KeyValueEngineTest {
     MutableClock clock = new MutableClock();
     Config config = Config.defaults().withMaxSnapshotAge(Duration.ofSeconds(1));
     try (KeyValueEngine engine = KeyValueEngine.open(tempDir, config, clock);
-         Snapshot snapshot = engine.snapshot()) {
+        Snapshot snapshot = engine.snapshot()) {
       clock.advance(Duration.ofSeconds(2));
       assertThatThrownBy(() -> snapshot.get(bytes("x")))
           .isInstanceOf(KvException.class)
@@ -141,8 +199,18 @@ final class KeyValueEngineTest {
 
       segment.set(java.lang.foreign.ValueLayout.JAVA_BYTE, Page.HEADER_SIZE + 1, (byte) 99);
       assertThatThrownBy(() -> Page.deserialize(42, segment))
-          .isInstanceOf(PageCorruptedException.class);
+          .isInstanceOf(PageCorruptedException.class)
+          .isInstanceOf(KvException.class)
+          .extracting("errorCode")
+          .isEqualTo(ErrorCode.CORRUPTED_PAGE);
     }
+  }
+
+  @Test
+  void cliMainIsPublic() throws Exception {
+    var main = EloydbKvCLI.class.getMethod("main", String[].class);
+    assertThat(Modifier.isPublic(main.getModifiers())).isTrue();
+    assertThat(Modifier.isStatic(main.getModifiers())).isTrue();
   }
 
   private static List<String> scanKeys(KeyValueEngine engine, String start, String end) {
