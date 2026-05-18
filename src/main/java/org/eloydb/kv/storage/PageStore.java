@@ -22,6 +22,7 @@ import java.util.Set;
 import org.eloydb.kv.ErrorCode;
 import org.eloydb.kv.KvException;
 import org.eloydb.kv.Metrics;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Single-file page-backed store with 8 KiB fixed pages.
@@ -243,7 +244,7 @@ public final class PageStore implements AutoCloseable {
   }
 
   /** Reads the meta page payload. Returns {@code null} if the store has never been initialised. */
-  public MetaPayload readMeta() {
+  public @Nullable MetaPayload readMeta() {
     try {
       if (channel.size() < Page.PAGE_SIZE) {
         return null;

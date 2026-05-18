@@ -5,9 +5,9 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import org.eloydb.kv.KeyValue;
+import org.eloydb.kv.storage.BufferPool;
 import org.eloydb.kv.storage.OverflowChain;
 import org.eloydb.kv.storage.Page;
-import org.eloydb.kv.storage.PageStore;
 import org.eloydb.kv.storage.PageType;
 import org.eloydb.kv.storage.SlottedPage;
 import org.eloydb.kv.storage.SlottedPage.InternalBuilder;
@@ -17,7 +17,7 @@ import org.eloydb.kv.storage.SlottedPage.LeafEntry;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Single-writer Copy-on-Write B+ tree backed by a {@link PageStore}.
+ * Single-writer Copy-on-Write B+ tree backed by a {@link BufferPool}.
  *
  * <p>Every modification clones the path from root to leaf, allocating fresh page ids for the new
  * pages. The previous root remains valid and is the durable root until the engine publishes the new
@@ -46,26 +46,26 @@ public final class CowBTree {
     }
   }
 
-  private final PageStore store;
+  private final BufferPool pages;
   private long nextLsn;
 
-  public CowBTree(PageStore store, long startingLsn) {
-    this.store = store;
+  public CowBTree(BufferPool pages, long startingLsn) {
+    this.pages = pages;
     this.nextLsn = startingLsn;
   }
 
   /** Allocates an empty leaf and returns its page id; used to bootstrap a new tree. */
-  public static long createEmpty(PageStore store, long lsn) {
-    long pid = store.allocate(PageType.LEAF);
+  public static long createEmpty(BufferPool pages, long lsn) {
+    long pid = pages.allocate(PageType.LEAF);
     byte[] payload = new LeafBuilder().build();
-    store.write(new Page(PageType.LEAF, lsn, pid, payload));
+    pages.write(new Page(PageType.LEAF, lsn, pid, payload));
     return pid;
   }
 
   /** Returns the value for {@code key} read through {@code root}, or empty if not present. */
   public Optional<byte[]> get(long root, byte[] key) {
     long pid = descendToLeaf(root, key);
-    Page leaf = store.read(pid);
+    Page leaf = pages.read(pid);
     List<LeafEntry> entries = SlottedPage.decodeLeaf(leaf.payload());
     int slot = findLeafSlot(entries, key);
     if (slot < 0) {
@@ -95,7 +95,7 @@ public final class CowBTree {
 
   /** Walks every page reachable from {@code root}, invoking {@code visitor} on each id. */
   public void walkAllPages(long root, java.util.function.LongConsumer visitor) {
-    Page page = store.read(root);
+    Page page = pages.read(root);
     visitor.accept(root);
     if (page.type() == PageType.LEAF) {
       for (LeafEntry e : SlottedPage.decodeLeaf(page.payload())) {
@@ -103,7 +103,7 @@ public final class CowBTree {
           long cursor = e.overflowHead();
           while (cursor != 0L) {
             visitor.accept(cursor);
-            Page ov = store.read(cursor);
+            Page ov = pages.read(cursor);
             cursor =
                 java.nio.ByteBuffer.wrap(ov.payload())
                     .order(java.nio.ByteOrder.BIG_ENDIAN)
@@ -124,7 +124,7 @@ public final class CowBTree {
    * --------------------------------------------------------------------- */
 
   private ApplyResult insert(long pid, byte[] key, byte[] value) {
-    Page page = store.read(pid);
+    Page page = pages.read(pid);
     if (page.type() == PageType.LEAF) {
       return insertLeaf(page, key, value);
     }
@@ -174,7 +174,7 @@ public final class CowBTree {
    * --------------------------------------------------------------------- */
 
   private long removeFromNode(long pid, byte[] key) {
-    Page page = store.read(pid);
+    Page page = pages.read(pid);
     if (page.type() == PageType.LEAF) {
       return removeFromLeaf(page, key);
     }
@@ -231,8 +231,8 @@ public final class CowBTree {
       builder.add(e);
     }
     if (builder.fits()) {
-      long pid = store.allocate(PageType.LEAF);
-      store.write(new Page(PageType.LEAF, allocLsn(), pid, builder.build()));
+      long pid = pages.allocate(PageType.LEAF);
+      pages.write(new Page(PageType.LEAF, allocLsn(), pid, builder.build()));
       return new Replaced(pid);
     }
     // Split: choose mid such that both halves fit.
@@ -245,16 +245,16 @@ public final class CowBTree {
     if (!lb.fits()) {
       throw new IllegalStateException("leaf left half still overflows after split");
     }
-    long leftPid = store.allocate(PageType.LEAF);
-    store.write(new Page(PageType.LEAF, allocLsn(), leftPid, lb.build()));
+    long leftPid = pages.allocate(PageType.LEAF);
+    pages.write(new Page(PageType.LEAF, allocLsn(), leftPid, lb.build()));
 
     LeafBuilder rb = new LeafBuilder();
     right.forEach(rb::add);
     if (!rb.fits()) {
       throw new IllegalStateException("leaf right half still overflows after split");
     }
-    long rightPid = store.allocate(PageType.LEAF);
-    store.write(new Page(PageType.LEAF, allocLsn(), rightPid, rb.build()));
+    long rightPid = pages.allocate(PageType.LEAF);
+    pages.write(new Page(PageType.LEAF, allocLsn(), rightPid, rb.build()));
 
     byte[] sep = Arrays.copyOf(right.get(0).key(), right.get(0).key().length);
     return new Split(leftPid, sep, rightPid);
@@ -266,8 +266,8 @@ public final class CowBTree {
       b.add(e);
     }
     if (b.fits()) {
-      long pid = store.allocate(PageType.INTERNAL);
-      store.write(new Page(PageType.INTERNAL, allocLsn(), pid, b.build()));
+      long pid = pages.allocate(PageType.INTERNAL);
+      pages.write(new Page(PageType.INTERNAL, allocLsn(), pid, b.build()));
       return new Replaced(pid);
     }
     int midpoint = chooseInternalSplit(entries);
@@ -281,16 +281,16 @@ public final class CowBTree {
     if (!lb.fits()) {
       throw new IllegalStateException("internal left half still overflows after split");
     }
-    long leftPid = store.allocate(PageType.INTERNAL);
-    store.write(new Page(PageType.INTERNAL, allocLsn(), leftPid, lb.build()));
+    long leftPid = pages.allocate(PageType.INTERNAL);
+    pages.write(new Page(PageType.INTERNAL, allocLsn(), leftPid, lb.build()));
 
     InternalBuilder rb = new InternalBuilder(promoted.childPid());
     rightEntries.forEach(rb::add);
     if (!rb.fits()) {
       throw new IllegalStateException("internal right half still overflows after split");
     }
-    long rightPid = store.allocate(PageType.INTERNAL);
-    store.write(new Page(PageType.INTERNAL, allocLsn(), rightPid, rb.build()));
+    long rightPid = pages.allocate(PageType.INTERNAL);
+    pages.write(new Page(PageType.INTERNAL, allocLsn(), rightPid, rb.build()));
 
     return new Split(
         leftPid, Arrays.copyOf(promoted.separator(), promoted.separator().length), rightPid);
@@ -335,7 +335,7 @@ public final class CowBTree {
   private long descendToLeaf(long pid, byte[] key) {
     long cursor = pid;
     while (true) {
-      Page page = store.read(cursor);
+      Page page = pages.read(cursor);
       if (page.type() == PageType.LEAF) {
         return cursor;
       }
@@ -351,10 +351,10 @@ public final class CowBTree {
       return r.pid();
     }
     Split split = (Split) result;
-    long newRootPid = store.allocate(PageType.INTERNAL);
+    long newRootPid = pages.allocate(PageType.INTERNAL);
     InternalBuilder b = new InternalBuilder(split.pid());
     b.add(new InternalEntry(split.separator(), split.rightPid()));
-    store.write(new Page(PageType.INTERNAL, allocLsn(), newRootPid, b.build()));
+    pages.write(new Page(PageType.INTERNAL, allocLsn(), newRootPid, b.build()));
     return newRootPid;
   }
 
@@ -374,7 +374,7 @@ public final class CowBTree {
     if (value.length <= SlottedPage.MAX_INLINE_VALUE_LEN) {
       return LeafEntry.inline(key, value);
     }
-    long head = OverflowChain.write(store, allocLsn(), value);
+    long head = OverflowChain.write(pages, allocLsn(), value);
     return LeafEntry.overflow(key, head, value.length);
   }
 
@@ -382,7 +382,7 @@ public final class CowBTree {
     if (!entry.overflow()) {
       return entry.value();
     }
-    return OverflowChain.read(store, entry.overflowHead(), entry.totalValueLength());
+    return OverflowChain.read(pages, entry.overflowHead(), entry.totalValueLength());
   }
 
   private static int findLeafSlot(List<LeafEntry> entries, byte[] key) {
@@ -417,7 +417,7 @@ public final class CowBTree {
   }
 
   private void walkRange(long pid, byte[] start, byte[] end, List<KeyValue> rows) {
-    Page page = store.read(pid);
+    Page page = pages.read(pid);
     if (page.type() == PageType.LEAF) {
       for (LeafEntry e : SlottedPage.decodeLeaf(page.payload())) {
         byte[] key = e.key();
@@ -433,7 +433,7 @@ public final class CowBTree {
     }
     List<InternalEntry> entries = SlottedPage.decodeInternal(page.payload());
     long leftmost = SlottedPage.internalLeftmostChild(page.payload());
-    @Nullable byte[] firstSep = entries.isEmpty() ? null : entries.get(0).separator();
+    byte @Nullable [] firstSep = entries.isEmpty() ? null : entries.get(0).separator();
     if (firstSep == null || Arrays.compareUnsigned(start, firstSep) < 0) {
       walkRange(leftmost, start, end, rows);
     }

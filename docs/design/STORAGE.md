@@ -19,6 +19,9 @@ Milestone 1 now has a readable storage foundation under `org.eloydb.kv`.
 - `MetaPayload` (page id 0) records `root_pid`, `commit_ts`, `next_alloc_pid`, `freelist_head_pid`,
   and `free_page_count`.
 - `SlottedPage` is the codec for the slotted leaf and internal payloads.
+- `BufferPool` is the sharded off-heap cache in front of `PageStore`: page ids are routed by
+  `pid mod shard_count`, each shard has its own page map and CLOCK ring, and dirty frames flush
+  through `PageStore.write(Page)`.
 - `CowBTree` is the single-writer Copy-on-Write B+ tree. `put` and `delete` always allocate fresh
   page ids along the modified path. Leaf and internal splits propagate up to the root; a root
   split synthesises a new internal root.
@@ -30,8 +33,9 @@ Milestone 1 now has a readable storage foundation under `org.eloydb.kv`.
 
 1. Buffer `put`/`delete` operations in `WriteTransaction`.
 2. On `commit()`, append the WAL records and `force(true)` — this is the durability boundary.
-3. Apply the operations to the CoW tree, computing a new `root_pid`.
-4. Write the dirtied pages to `store.0001` and rewrite the meta page with `(root_pid, commit_ts)`.
+3. Apply the operations to the CoW tree, computing a new `root_pid` and dirtying buffer-pool pages.
+4. Flush dirty buffer-pool pages to `store.0001` and rewrite the meta page with
+   `(root_pid, commit_ts)`.
 5. `force(true)` the store.
 
 A crash between step 2 and step 5 is recovered by reading the meta page, then replaying any WAL
@@ -112,12 +116,22 @@ entries[count]: u64 freed_page_id
 itself reused. `free(pid)` pushes onto the head, allocating a new head page when the current one
 fills (`FREELIST_CAPACITY` ≈ 1019 entries per page).
 
+## Buffer Pool
+
+`BufferPool` caches serialized 8 KiB pages in direct `ByteBuffer` frames. `pin(pageId)` returns a
+`PageHandle`; hits and misses are counted in the engine metrics registry. `write(Page)` installs a
+validated page image into the cache and marks the frame dirty. `flushDirtyPages()` writes dirty
+frames through the backing `PageStore` without evicting clean hot pages.
+
+Eviction is shard-local CLOCK. Pinned frames are never candidates; if every frame in the target
+shard is pinned, the pool raises `INSUFFICIENT_RESOURCES` instead of evicting an in-use page.
+
 ## Follow-up Work
 
 - Merge / rebalance on leaf and internal under-fill (currently absent).
 - Free pages from the previous CoW path once they are no longer reachable from any live snapshot
   (page reclaimer, MVCC refcounts).
-- Zero-copy `Page` reads against the underlying `MemorySegment` so the steady-state read path
-  produces no on-heap allocations.
+- Zero-copy slotted-page decoding from buffer-pool frames so the steady-state read path produces no
+  on-heap allocations.
 - Page-image WAL records, group commit, and checkpoints (currently the WAL still logs logical
   `PUT`/`DELETE`/`COMMIT` records and fsyncs per commit).
