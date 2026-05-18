@@ -2,15 +2,14 @@ package org.eloydb.kv;
 
 import java.nio.file.Path;
 import java.time.Clock;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.eloydb.kv.btree.CowBTree;
 import org.eloydb.kv.engine.EngineSnapshot;
 import org.eloydb.kv.engine.ListCursor;
+import org.eloydb.kv.engine.OverlayView;
 import org.eloydb.kv.internal.Bytes;
 import org.eloydb.kv.internal.Operation;
 import org.eloydb.kv.storage.BufferPool;
@@ -217,19 +216,19 @@ public final class KeyValueEngine implements AutoCloseable {
   synchronized Cursor transactionScan(
       WriteTransaction txn, byte[] startInclusive, byte[] endExclusive) {
     ensureWriter(txn);
-    TreeMap<Bytes, byte[]> overlay = materializeRange(rootPid, startInclusive, endExclusive);
+    var overlay = OverlayView.materializeRange(tree, rootPid, startInclusive, endExclusive);
     for (Operation op : txn.operations()) {
-      applyToOverlay(overlay, op);
+      OverlayView.apply(overlay, op);
     }
-    return cursorFor(overlay, startInclusive, endExclusive);
+    return OverlayView.cursorFor(overlay, startInclusive, endExclusive);
   }
 
   synchronized Snapshot transactionSnapshot(WriteTransaction txn) {
     ensureWriter(txn);
     // Snapshots over an active writer see the writer's pending overlay too.
-    TreeMap<Bytes, byte[]> overlay = materializeAll(rootPid);
+    var overlay = OverlayView.materializeAll(tree, rootPid);
     for (Operation op : txn.operations()) {
-      applyToOverlay(overlay, op);
+      OverlayView.apply(overlay, op);
     }
     liveSnapshots.incrementAndGet();
     return EngineSnapshot.overlay(commitTs, overlay, config, clock, liveSnapshots::decrementAndGet);
@@ -272,49 +271,11 @@ public final class KeyValueEngine implements AutoCloseable {
     }
   }
 
-  private TreeMap<Bytes, byte[]> materializeAll(long root) {
-    var overlay = new TreeMap<Bytes, byte[]>();
-    for (KeyValue row : tree.scan(root, new byte[0], new byte[] {(byte) 0xff})) {
-      overlay.put(Bytes.copyOf(row.key()), row.value());
-    }
-    // Fallback: walk a wide range to capture keys >= 0xff prefix.
-    return overlay;
-  }
-
-  private TreeMap<Bytes, byte[]> materializeRange(long root, byte[] start, byte[] end) {
-    var overlay = new TreeMap<Bytes, byte[]>();
-    for (KeyValue row : tree.scan(root, start, end)) {
-      overlay.put(Bytes.copyOf(row.key()), row.value());
-    }
-    return overlay;
-  }
-
-  private Cursor cursorFor(TreeMap<Bytes, byte[]> overlay, byte[] start, byte[] end) {
-    Bytes lo = Bytes.copyOf(start);
-    Bytes hi = Bytes.copyOf(end);
-    if (lo.compareTo(hi) > 0) {
-      throw new KvException(ErrorCode.INVALID_ARGUMENT, "scan start must be <= end");
-    }
-    var rows = new ArrayList<KeyValue>();
-    overlay
-        .subMap(lo, true, hi, false)
-        .forEach((key, value) -> rows.add(new KeyValue(key.copy(), value)));
-    return new ListCursor(rows);
-  }
-
   private static long applyOperation(CowBTree tree, long root, Operation op) {
     if (op.kind() == Operation.Kind.PUT) {
       return tree.put(root, op.unsafeKey(), op.unsafeValue());
     }
     return tree.delete(root, op.unsafeKey());
-  }
-
-  private static void applyToOverlay(TreeMap<Bytes, byte[]> overlay, Operation op) {
-    if (op.kind() == Operation.Kind.PUT) {
-      overlay.put(Bytes.copyOf(op.unsafeKey()), op.value());
-    } else {
-      overlay.remove(Bytes.copyOf(op.unsafeKey()));
-    }
   }
 
   private long computeTreeHeight() {

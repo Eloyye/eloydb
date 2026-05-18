@@ -47,10 +47,12 @@ public final class CowBTree {
   }
 
   private final BufferPool pages;
+  private final NodePacker packer;
   private long nextLsn;
 
   public CowBTree(BufferPool pages, long startingLsn) {
     this.pages = pages;
+    this.packer = new NodePacker(pages, this::allocLsn);
     this.nextLsn = startingLsn;
   }
 
@@ -67,7 +69,7 @@ public final class CowBTree {
     long pid = descendToLeaf(root, key);
     Page leaf = pages.read(pid);
     List<LeafEntry> entries = SlottedPage.decodeLeaf(leaf.payload());
-    int slot = findLeafSlot(entries, key);
+    int slot = NodeSearch.findLeafSlot(entries, key);
     if (slot < 0) {
       return Optional.empty();
     }
@@ -133,7 +135,7 @@ public final class CowBTree {
 
   private ApplyResult insertLeaf(Page page, byte[] key, byte[] value) {
     List<LeafEntry> entries = new ArrayList<>(SlottedPage.decodeLeaf(page.payload()));
-    int slot = findLeafSlot(entries, key);
+    int slot = NodeSearch.findLeafSlot(entries, key);
     LeafEntry newEntry = createLeafEntry(key, value);
     if (slot >= 0) {
       LeafEntry old = entries.get(slot);
@@ -145,13 +147,13 @@ public final class CowBTree {
     } else {
       entries.add(-slot - 1, newEntry);
     }
-    return packLeaf(entries);
+    return packer.packLeaf(entries);
   }
 
   private ApplyResult insertInternal(Page page, byte[] key, byte[] value) {
     List<InternalEntry> entries = new ArrayList<>(SlottedPage.decodeInternal(page.payload()));
     long leftmost = SlottedPage.internalLeftmostChild(page.payload());
-    int idx = findChildIndex(entries, key);
+    int idx = NodeSearch.findChildIndex(entries, key);
     long childPid = idx == -1 ? leftmost : entries.get(idx).childPid();
     ApplyResult childResult = insert(childPid, key, value);
 
@@ -166,7 +168,7 @@ public final class CowBTree {
     if (childResult instanceof Split split) {
       newEntries.add(idx + 1, new InternalEntry(split.separator(), split.rightPid()));
     }
-    return packInternal(newLeftmost, newEntries);
+    return packer.packInternal(newLeftmost, newEntries);
   }
 
   /* --------------------------------------------------------------------- *
@@ -183,13 +185,13 @@ public final class CowBTree {
 
   private long removeFromLeaf(Page page, byte[] key) {
     List<LeafEntry> entries = new ArrayList<>(SlottedPage.decodeLeaf(page.payload()));
-    int slot = findLeafSlot(entries, key);
+    int slot = NodeSearch.findLeafSlot(entries, key);
     if (slot < 0) {
       // No change: return original pid so callers don't churn.
       return page.pageId();
     }
     entries.remove(slot);
-    ApplyResult result = packLeaf(entries);
+    ApplyResult result = packer.packLeaf(entries);
     // Delete should never split (we only shrink).
     if (result instanceof Split) {
       throw new IllegalStateException("delete unexpectedly produced a split");
@@ -200,7 +202,7 @@ public final class CowBTree {
   private long removeFromInternal(Page page, byte[] key) {
     List<InternalEntry> entries = new ArrayList<>(SlottedPage.decodeInternal(page.payload()));
     long leftmost = SlottedPage.internalLeftmostChild(page.payload());
-    int idx = findChildIndex(entries, key);
+    int idx = NodeSearch.findChildIndex(entries, key);
     long childPid = idx == -1 ? leftmost : entries.get(idx).childPid();
     long newChildPid = removeFromNode(childPid, key);
     if (newChildPid == childPid) {
@@ -214,118 +216,11 @@ public final class CowBTree {
       InternalEntry existing = entries.get(idx);
       newEntries.set(idx, new InternalEntry(existing.separator(), newChildPid));
     }
-    ApplyResult repacked = packInternal(newLeftmost, newEntries);
+    ApplyResult repacked = packer.packInternal(newLeftmost, newEntries);
     if (repacked instanceof Split) {
       throw new IllegalStateException("delete unexpectedly produced a split");
     }
     return repacked.pid();
-  }
-
-  /* --------------------------------------------------------------------- *
-   *                              Packing                                  *
-   * --------------------------------------------------------------------- */
-
-  private ApplyResult packLeaf(List<LeafEntry> entries) {
-    LeafBuilder builder = new LeafBuilder();
-    for (LeafEntry e : entries) {
-      builder.add(e);
-    }
-    if (builder.fits()) {
-      long pid = pages.allocate(PageType.LEAF);
-      pages.write(new Page(PageType.LEAF, allocLsn(), pid, builder.build()));
-      return new Replaced(pid);
-    }
-    // Split: choose mid such that both halves fit.
-    int midpoint = chooseLeafSplit(entries);
-    List<LeafEntry> left = entries.subList(0, midpoint);
-    List<LeafEntry> right = entries.subList(midpoint, entries.size());
-
-    LeafBuilder lb = new LeafBuilder();
-    left.forEach(lb::add);
-    if (!lb.fits()) {
-      throw new IllegalStateException("leaf left half still overflows after split");
-    }
-    long leftPid = pages.allocate(PageType.LEAF);
-    pages.write(new Page(PageType.LEAF, allocLsn(), leftPid, lb.build()));
-
-    LeafBuilder rb = new LeafBuilder();
-    right.forEach(rb::add);
-    if (!rb.fits()) {
-      throw new IllegalStateException("leaf right half still overflows after split");
-    }
-    long rightPid = pages.allocate(PageType.LEAF);
-    pages.write(new Page(PageType.LEAF, allocLsn(), rightPid, rb.build()));
-
-    byte[] sep = Arrays.copyOf(right.get(0).key(), right.get(0).key().length);
-    return new Split(leftPid, sep, rightPid);
-  }
-
-  private ApplyResult packInternal(long leftmost, List<InternalEntry> entries) {
-    InternalBuilder b = new InternalBuilder(leftmost);
-    for (InternalEntry e : entries) {
-      b.add(e);
-    }
-    if (b.fits()) {
-      long pid = pages.allocate(PageType.INTERNAL);
-      pages.write(new Page(PageType.INTERNAL, allocLsn(), pid, b.build()));
-      return new Replaced(pid);
-    }
-    int midpoint = chooseInternalSplit(entries);
-    // entries[midpoint] is the promoted separator. Its child becomes leftmost of the right node.
-    InternalEntry promoted = entries.get(midpoint);
-    List<InternalEntry> leftEntries = entries.subList(0, midpoint);
-    List<InternalEntry> rightEntries = entries.subList(midpoint + 1, entries.size());
-
-    InternalBuilder lb = new InternalBuilder(leftmost);
-    leftEntries.forEach(lb::add);
-    if (!lb.fits()) {
-      throw new IllegalStateException("internal left half still overflows after split");
-    }
-    long leftPid = pages.allocate(PageType.INTERNAL);
-    pages.write(new Page(PageType.INTERNAL, allocLsn(), leftPid, lb.build()));
-
-    InternalBuilder rb = new InternalBuilder(promoted.childPid());
-    rightEntries.forEach(rb::add);
-    if (!rb.fits()) {
-      throw new IllegalStateException("internal right half still overflows after split");
-    }
-    long rightPid = pages.allocate(PageType.INTERNAL);
-    pages.write(new Page(PageType.INTERNAL, allocLsn(), rightPid, rb.build()));
-
-    return new Split(
-        leftPid, Arrays.copyOf(promoted.separator(), promoted.separator().length), rightPid);
-  }
-
-  private int chooseLeafSplit(List<LeafEntry> entries) {
-    int total = 0;
-    for (LeafEntry e : entries) {
-      total += LeafBuilder.costOf(e);
-    }
-    int target = total / 2;
-    int running = 0;
-    for (int i = 0; i < entries.size(); i++) {
-      running += LeafBuilder.costOf(entries.get(i));
-      if (running >= target && i > 0) {
-        return i;
-      }
-    }
-    return Math.max(1, entries.size() / 2);
-  }
-
-  private int chooseInternalSplit(List<InternalEntry> entries) {
-    int total = 0;
-    for (InternalEntry e : entries) {
-      total += InternalBuilder.costOf(e);
-    }
-    int target = total / 2;
-    int running = 0;
-    for (int i = 0; i < entries.size(); i++) {
-      running += InternalBuilder.costOf(entries.get(i));
-      if (running >= target && i > 0) {
-        return i;
-      }
-    }
-    return Math.max(1, entries.size() / 2);
   }
 
   /* --------------------------------------------------------------------- *
@@ -341,7 +236,7 @@ public final class CowBTree {
       }
       List<InternalEntry> entries = SlottedPage.decodeInternal(page.payload());
       long leftmost = SlottedPage.internalLeftmostChild(page.payload());
-      int idx = findChildIndex(entries, key);
+      int idx = NodeSearch.findChildIndex(entries, key);
       cursor = idx == -1 ? leftmost : entries.get(idx).childPid();
     }
   }
@@ -383,37 +278,6 @@ public final class CowBTree {
       return entry.value();
     }
     return OverflowChain.read(pages, entry.overflowHead(), entry.totalValueLength());
-  }
-
-  private static int findLeafSlot(List<LeafEntry> entries, byte[] key) {
-    int lo = 0;
-    int hi = entries.size();
-    while (lo < hi) {
-      int mid = (lo + hi) >>> 1;
-      int cmp = Arrays.compareUnsigned(entries.get(mid).key(), key);
-      if (cmp < 0) {
-        lo = mid + 1;
-      } else if (cmp > 0) {
-        hi = mid;
-      } else {
-        return mid;
-      }
-    }
-    return -(lo + 1);
-  }
-
-  private static int findChildIndex(List<InternalEntry> entries, byte[] key) {
-    int lo = 0;
-    int hi = entries.size();
-    while (lo < hi) {
-      int mid = (lo + hi) >>> 1;
-      if (Arrays.compareUnsigned(entries.get(mid).separator(), key) <= 0) {
-        lo = mid + 1;
-      } else {
-        hi = mid;
-      }
-    }
-    return lo - 1;
   }
 
   private void walkRange(long pid, byte[] start, byte[] end, List<KeyValue> rows) {

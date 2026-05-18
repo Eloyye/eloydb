@@ -2,8 +2,6 @@ package org.eloydb.kv.engine;
 
 import java.time.Clock;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeMap;
@@ -11,7 +9,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.eloydb.kv.Config;
 import org.eloydb.kv.Cursor;
 import org.eloydb.kv.ErrorCode;
-import org.eloydb.kv.KeyValue;
 import org.eloydb.kv.KvException;
 import org.eloydb.kv.Snapshot;
 import org.eloydb.kv.btree.CowBTree;
@@ -83,10 +80,7 @@ public final class EngineSnapshot implements Snapshot {
   public Optional<byte[]> get(byte[] key) {
     ensureUsable();
     if (overlay != null) {
-      byte[] value = overlay.get(Bytes.copyOf(key));
-      return value == null
-          ? Optional.empty()
-          : Optional.of(java.util.Arrays.copyOf(value, value.length));
+      return OverlayView.get(overlay, key);
     }
     return Objects.requireNonNull(tree).get(rootPid, key);
   }
@@ -94,17 +88,8 @@ public final class EngineSnapshot implements Snapshot {
   @Override
   public Cursor scan(byte[] startInclusive, byte[] endExclusive) {
     ensureUsable();
-    Bytes lo = Bytes.copyOf(startInclusive);
-    Bytes hi = Bytes.copyOf(endExclusive);
-    if (lo.compareTo(hi) > 0) {
-      throw new KvException(ErrorCode.INVALID_ARGUMENT, "scan start must be <= end");
-    }
     if (overlay != null) {
-      var rows = new ArrayList<KeyValue>();
-      for (Map.Entry<Bytes, byte[]> entry : overlay.subMap(lo, true, hi, false).entrySet()) {
-        rows.add(new KeyValue(entry.getKey().copy(), entry.getValue()));
-      }
-      return new ListCursor(rows);
+      return OverlayView.cursorFor(overlay, startInclusive, endExclusive);
     }
     return new ListCursor(Objects.requireNonNull(tree).scan(rootPid, startInclusive, endExclusive));
   }
