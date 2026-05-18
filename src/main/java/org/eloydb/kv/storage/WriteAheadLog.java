@@ -11,16 +11,13 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
-import java.util.TreeMap;
 import java.util.zip.CRC32C;
 import org.eloydb.kv.CommitResult;
 import org.eloydb.kv.ErrorCode;
 import org.eloydb.kv.KvException;
 import org.eloydb.kv.Metrics;
-import org.eloydb.kv.internal.Bytes;
 import org.eloydb.kv.internal.Operation;
 
-@SuppressWarnings("NonApiType")
 public final class WriteAheadLog implements AutoCloseable {
   private static final int MAGIC = 0x454c5741;
   private static final int HEADER_BYTES = Integer.BYTES + Integer.BYTES + Byte.BYTES + Long.BYTES;
@@ -52,7 +49,7 @@ public final class WriteAheadLog implements AutoCloseable {
   }
 
   public RecoveryResult recover() {
-    var committed = new TreeMap<Bytes, byte[]>();
+    var transactions = new ArrayList<CommittedTransaction>();
     var pending = new java.util.HashMap<Long, List<Operation>>();
     long lastGoodPosition = 0;
     long recoveredCommitTs = 0;
@@ -65,11 +62,9 @@ public final class WriteAheadLog implements AutoCloseable {
           lastGoodPosition = reader.position();
           if (record.type == COMMIT) {
             List<Operation> operations = pending.remove(record.txId);
-            if (operations != null) {
-              for (Operation operation : operations) {
-                apply(committed, operation);
-              }
-            }
+            transactions.add(
+                new CommittedTransaction(
+                    record.commitTs(), operations == null ? List.of() : List.copyOf(operations)));
             recoveredCommitTs = record.commitTs();
           } else {
             pending
@@ -79,12 +74,12 @@ public final class WriteAheadLog implements AutoCloseable {
         } catch (EOFException e) {
           truncateIfNeeded(reader.size(), lastGoodPosition);
           positionForAppend(lastGoodPosition);
-          return new RecoveryResult(committed, recordStart, recoveredCommitTs);
+          return new RecoveryResult(transactions, recordStart, recoveredCommitTs);
         } catch (TornWalTailException e) {
           truncateIfNeeded(reader.size(), lastGoodPosition);
           metrics.increment("wal.torn_tail_truncations");
           positionForAppend(lastGoodPosition);
-          return new RecoveryResult(committed, lastGoodPosition, recoveredCommitTs);
+          return new RecoveryResult(transactions, lastGoodPosition, recoveredCommitTs);
         }
       }
     } catch (IOException e) {
@@ -234,16 +229,10 @@ public final class WriteAheadLog implements AutoCloseable {
     }
   }
 
-  private static void apply(TreeMap<Bytes, byte[]> map, Operation operation) {
-    if (operation.kind() == Operation.Kind.PUT) {
-      map.put(Bytes.copyOf(operation.unsafeKey()), operation.unsafeValue());
-    } else {
-      map.remove(Bytes.copyOf(operation.unsafeKey()));
-    }
-  }
-
   public record RecoveryResult(
-      TreeMap<Bytes, byte[]> map, long recoveredWalPosition, long commitTs) {}
+      List<CommittedTransaction> transactions, long recoveredWalPosition, long commitTs) {}
+
+  public record CommittedTransaction(long commitTs, List<Operation> operations) {}
 
   public record VerificationResult(boolean ok) {}
 
