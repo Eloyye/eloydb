@@ -56,8 +56,8 @@ final class EloydbKvRenderer {
     out.println(
         "ok="
             + result.ok()
-            + " keys="
-            + result.keyCount()
+            + " pages="
+            + result.pageCount()
             + " liveSnapshots="
             + result.liveSnapshots());
   }

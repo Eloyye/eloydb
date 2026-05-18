@@ -2,20 +2,33 @@ package org.eloydb.kv;
 
 import java.nio.file.Path;
 import java.time.Clock;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.eloydb.kv.engine.Cursors;
+import org.eloydb.kv.btree.CowBTree;
 import org.eloydb.kv.engine.EngineSnapshot;
+import org.eloydb.kv.engine.ListCursor;
 import org.eloydb.kv.internal.Bytes;
 import org.eloydb.kv.internal.Operation;
+import org.eloydb.kv.storage.MetaPayload;
+import org.eloydb.kv.storage.PageStore;
 import org.eloydb.kv.storage.WriteAheadLog;
+import org.eloydb.kv.storage.WriteAheadLog.CommittedTransaction;
 
 /**
  * Embeddable EloyDB key-value engine.
+ *
+ * <p>State lives in two on-disk artefacts:
+ *
+ * <ul>
+ *   <li>{@code store.0001} — a {@link PageStore} of 8 KiB pages containing the Copy-on-Write B+
+ *       tree, overflow chains, the free list, and the meta page that names the current root.
+ *   <li>{@code wal.000001} — the write-ahead log; the durability boundary is the COMMIT record
+ *       fsync.
+ * </ul>
  *
  * <p>Example:
  *
@@ -26,13 +39,6 @@ import org.eloydb.kv.storage.WriteAheadLog;
  *     txn.put("hello".getBytes(UTF_8), "world".getBytes(UTF_8));
  *     txn.commit();
  *   }
- *
- *   try (Snapshot snapshot = engine.snapshot();
- *       Cursor cursor = snapshot.scan(new byte[0], new byte[] {(byte) 0xff})) {
- *     while (cursor.next()) {
- *       KeyValue row = cursor.current();
- *     }
- *   }
  * }
  * }</pre>
  */
@@ -41,35 +47,42 @@ public final class KeyValueEngine implements AutoCloseable {
   private final Config config;
   private final Clock clock;
   private final WriteAheadLog wal;
+  private final PageStore store;
+  private final CowBTree tree;
   private final Metrics metrics;
-  private final TreeMap<Bytes, byte[]> committed;
   private final AtomicInteger liveSnapshots = new AtomicInteger();
   private final AtomicBoolean closed = new AtomicBoolean();
 
   private long nextTxId = 1;
   private long commitTs;
+  private long rootPid;
   private boolean writerActive;
 
   private KeyValueEngine(
       Config config,
       Clock clock,
       WriteAheadLog wal,
-      WriteAheadLog.RecoveryResult recoveryResult,
+      PageStore store,
+      CowBTree tree,
+      long rootPid,
+      long commitTs,
       Metrics metrics) {
     this.config = config;
     this.clock = clock;
     this.wal = wal;
+    this.store = store;
+    this.tree = tree;
+    this.rootPid = rootPid;
+    this.commitTs = commitTs;
     this.metrics = metrics;
-    this.committed = recoveryResult.map();
-    this.commitTs = recoveryResult.commitTs();
-    initKvEngineStartMetric(metrics);
+    initMetrics(metrics);
   }
 
-  private void initKvEngineStartMetric(Metrics metrics) {
+  private void initMetrics(Metrics metrics) {
     metrics.gauge("snapshots.live", () -> (long) liveSnapshots.get());
-    metrics.gauge("tree.height", () -> committed.isEmpty() ? 0L : 1L);
-    metrics.gauge("tree.pages_allocated", () -> Math.max(1L, committed.size()));
-    metrics.gauge("tree.pages_freed", () -> 0L);
+    metrics.gauge("tree.pages_allocated", store::allocatedPages);
+    metrics.gauge("tree.height", this::computeTreeHeight);
+    metrics.gauge("freelist.pages", () -> (long) store.freePageCount());
     metrics.gauge("bufferpool.hits", () -> 0L);
     metrics.gauge("bufferpool.misses", () -> 0L);
     metrics.gauge("bufferpool.evictions", () -> 0L);
@@ -83,9 +96,44 @@ public final class KeyValueEngine implements AutoCloseable {
 
   static KeyValueEngine open(Path directory, Config config, Clock clock) {
     var metrics = new Metrics();
-    var wal = WriteAheadLog.open(directory, metrics);
+    PageStore store = PageStore.open(directory, metrics);
+    WriteAheadLog wal = WriteAheadLog.open(directory, metrics);
     WriteAheadLog.RecoveryResult recoveryResult = wal.recover();
-    return new KeyValueEngine(config, clock, wal, recoveryResult, metrics);
+
+    MetaPayload meta = store.readMeta();
+    long rootPid;
+    long commitTs;
+    long startingLsn;
+    if (meta != null && meta.rootPid() != 0L) {
+      rootPid = meta.rootPid();
+      commitTs = meta.commitTs();
+      startingLsn = commitTs;
+    } else {
+      rootPid = CowBTree.createEmpty(store, 0L);
+      commitTs = 0L;
+      startingLsn = 0L;
+      store.writeMeta(0L, rootPid, 0L);
+      store.sync();
+    }
+    CowBTree tree = new CowBTree(store, startingLsn);
+
+    for (CommittedTransaction tx : recoveryResult.transactions()) {
+      if (tx.commitTs() <= commitTs) {
+        continue;
+      }
+      for (Operation op : tx.operations()) {
+        rootPid = applyOperation(tree, rootPid, op);
+      }
+      commitTs = tx.commitTs();
+    }
+    if (commitTs != recoveryResult.commitTs()) {
+      commitTs = Math.max(commitTs, recoveryResult.commitTs());
+    }
+    // Persist post-recovery state so a subsequent restart can skip the replay if the WAL is rolled.
+    store.writeMeta(commitTs, rootPid, commitTs);
+    store.sync();
+
+    return new KeyValueEngine(config, clock, wal, store, tree, rootPid, commitTs, metrics);
   }
 
   /**
@@ -105,20 +153,20 @@ public final class KeyValueEngine implements AutoCloseable {
   public synchronized Snapshot snapshot() {
     ensureOpen();
     liveSnapshots.incrementAndGet();
-    return new EngineSnapshot(commitTs, config, clock, committed, liveSnapshots::decrementAndGet);
+    return new EngineSnapshot(
+        commitTs, rootPid, tree, config, clock, liveSnapshots::decrementAndGet);
   }
 
   /** Returns a defensive copy of the committed value for {@code key}, if present. */
   public synchronized Optional<byte[]> get(byte[] key) {
     ensureOpen();
-    byte[] value = committed.get(Bytes.copyOf(key));
-    return value == null ? Optional.empty() : Optional.of(Arrays.copyOf(value, value.length));
+    return tree.get(rootPid, key);
   }
 
   /** Scans committed keys in unsigned byte order over {@code [startInclusive, endExclusive)}. */
   public synchronized Cursor scan(byte[] startInclusive, byte[] endExclusive) {
     ensureOpen();
-    return Cursors.forMap(committed, Bytes.copyOf(startInclusive), Bytes.copyOf(endExclusive));
+    return new ListCursor(tree.scan(rootPid, startInclusive, endExclusive));
   }
 
   /** Returns the engine's in-process metrics registry. */
@@ -126,46 +174,62 @@ public final class KeyValueEngine implements AutoCloseable {
     return metrics;
   }
 
-  /** Performs lightweight consistency checks over the current in-memory state. */
-  public VerifyResult verify() {
+  /** Performs lightweight consistency checks over the current on-disk state. */
+  public synchronized VerifyResult verify() {
     ensureOpen();
-    return new VerifyResult(committed.size(), liveSnapshots.get(), wal.verify().ok());
+    long reachable = 0;
+    var counter = new long[1];
+    tree.walkAllPages(rootPid, pid -> counter[0]++);
+    reachable = counter[0];
+    boolean walOk = wal.verify().ok();
+    return new VerifyResult(reachable, liveSnapshots.get(), walOk);
   }
 
   @Override
   public synchronized void close() {
     if (closed.compareAndSet(false, true)) {
-      wal.close();
+      try {
+        wal.close();
+      } finally {
+        store.close();
+      }
     }
   }
 
+  /* --------------------------------------------------------------------- *
+   *                         WriteTransaction hooks                        *
+   * --------------------------------------------------------------------- */
+
   synchronized Optional<byte[]> transactionGet(WriteTransaction txn, byte[] key) {
     ensureWriter(txn);
-    Bytes wrapped = Bytes.copyOf(key);
-    Operation operation = txn.latestOperation(wrapped);
+    Operation operation = txn.latestOperation(Bytes.copyOf(key));
     if (operation != null) {
       return operation.kind() == Operation.Kind.DELETE
           ? Optional.empty()
           : Optional.of(operation.value());
     }
-    byte[] value = committed.get(wrapped);
-    return value == null ? Optional.empty() : Optional.of(Arrays.copyOf(value, value.length));
+    return tree.get(rootPid, key);
   }
 
   synchronized Cursor transactionScan(
       WriteTransaction txn, byte[] startInclusive, byte[] endExclusive) {
     ensureWriter(txn);
-    TreeMap<Bytes, byte[]> overlay = copyCommitted();
-    txn.operations().forEach(operation -> apply(overlay, operation));
-    return Cursors.forMap(overlay, Bytes.copyOf(startInclusive), Bytes.copyOf(endExclusive));
+    TreeMap<Bytes, byte[]> overlay = materializeRange(rootPid, startInclusive, endExclusive);
+    for (Operation op : txn.operations()) {
+      applyToOverlay(overlay, op);
+    }
+    return cursorFor(overlay, startInclusive, endExclusive);
   }
 
   synchronized Snapshot transactionSnapshot(WriteTransaction txn) {
     ensureWriter(txn);
-    TreeMap<Bytes, byte[]> overlay = copyCommitted();
-    txn.operations().forEach(operation -> apply(overlay, operation));
+    // Snapshots over an active writer see the writer's pending overlay too.
+    TreeMap<Bytes, byte[]> overlay = materializeAll(rootPid);
+    for (Operation op : txn.operations()) {
+      applyToOverlay(overlay, op);
+    }
     liveSnapshots.incrementAndGet();
-    return new EngineSnapshot(commitTs, config, clock, overlay, liveSnapshots::decrementAndGet);
+    return EngineSnapshot.overlay(commitTs, overlay, config, clock, liveSnapshots::decrementAndGet);
   }
 
   synchronized CommitResult commit(WriteTransaction txn) {
@@ -173,8 +237,15 @@ public final class KeyValueEngine implements AutoCloseable {
     List<Operation> operations = txn.operations();
     long newCommitTs = commitTs + 1;
     CommitResult result = wal.appendCommitted(txn.txId(), newCommitTs, operations);
-    operations.forEach(operation -> apply(committed, operation));
+
+    long workingRoot = rootPid;
+    for (Operation op : operations) {
+      workingRoot = applyOperation(tree, workingRoot, op);
+    }
+    rootPid = workingRoot;
     commitTs = newCommitTs;
+    store.writeMeta(commitTs, rootPid, commitTs);
+    store.sync();
     writerActive = false;
     return result;
   }
@@ -197,21 +268,63 @@ public final class KeyValueEngine implements AutoCloseable {
     }
   }
 
-  private TreeMap<Bytes, byte[]> copyCommitted() {
-    var copy = new TreeMap<Bytes, byte[]>();
-    committed.forEach((key, value) -> copy.put(key, Arrays.copyOf(value, value.length)));
-    return copy;
-  }
-
-  private static void apply(TreeMap<Bytes, byte[]> map, Operation operation) {
-    if (operation.kind() == Operation.Kind.PUT) {
-      map.put(
-          Bytes.copyOf(operation.unsafeKey()),
-          Arrays.copyOf(operation.unsafeValue(), operation.unsafeValue().length));
-      return;
+  private TreeMap<Bytes, byte[]> materializeAll(long root) {
+    var overlay = new TreeMap<Bytes, byte[]>();
+    for (KeyValue row : tree.scan(root, new byte[0], new byte[] {(byte) 0xff})) {
+      overlay.put(Bytes.copyOf(row.key()), row.value());
     }
-    map.remove(Bytes.copyOf(operation.unsafeKey()));
+    // Fallback: walk a wide range to capture keys >= 0xff prefix.
+    return overlay;
   }
 
-  public record VerifyResult(long keyCount, long liveSnapshots, boolean ok) {}
+  private TreeMap<Bytes, byte[]> materializeRange(long root, byte[] start, byte[] end) {
+    var overlay = new TreeMap<Bytes, byte[]>();
+    for (KeyValue row : tree.scan(root, start, end)) {
+      overlay.put(Bytes.copyOf(row.key()), row.value());
+    }
+    return overlay;
+  }
+
+  private Cursor cursorFor(TreeMap<Bytes, byte[]> overlay, byte[] start, byte[] end) {
+    Bytes lo = Bytes.copyOf(start);
+    Bytes hi = Bytes.copyOf(end);
+    if (lo.compareTo(hi) > 0) {
+      throw new KvException(ErrorCode.INVALID_ARGUMENT, "scan start must be <= end");
+    }
+    var rows = new ArrayList<KeyValue>();
+    overlay
+        .subMap(lo, true, hi, false)
+        .forEach((key, value) -> rows.add(new KeyValue(key.copy(), value)));
+    return new ListCursor(rows);
+  }
+
+  private static long applyOperation(CowBTree tree, long root, Operation op) {
+    if (op.kind() == Operation.Kind.PUT) {
+      return tree.put(root, op.unsafeKey(), op.unsafeValue());
+    }
+    return tree.delete(root, op.unsafeKey());
+  }
+
+  private static void applyToOverlay(TreeMap<Bytes, byte[]> overlay, Operation op) {
+    if (op.kind() == Operation.Kind.PUT) {
+      overlay.put(Bytes.copyOf(op.unsafeKey()), op.value());
+    } else {
+      overlay.remove(Bytes.copyOf(op.unsafeKey()));
+    }
+  }
+
+  private long computeTreeHeight() {
+    long pid = rootPid;
+    long height = 0;
+    while (true) {
+      var page = store.read(pid);
+      height++;
+      if (page.type() == org.eloydb.kv.storage.PageType.LEAF) {
+        return height;
+      }
+      pid = org.eloydb.kv.storage.SlottedPage.internalLeftmostChild(page.payload());
+    }
+  }
+
+  public record VerifyResult(long pageCount, long liveSnapshots, boolean ok) {}
 }
