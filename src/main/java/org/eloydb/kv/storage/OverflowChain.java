@@ -24,14 +24,14 @@ public final class OverflowChain {
   private OverflowChain() {}
 
   /** Writes {@code value} as a chain of overflow pages, returning the head page id. */
-  public static long write(PageStore store, long lsn, byte[] value) {
+  public static long write(BufferPool pages, long lsn, byte[] value) {
     if (value.length == 0) {
       throw new IllegalArgumentException("overflow chains must hold ≥1 byte");
     }
     int chunks = (value.length + CHUNK_CAPACITY - 1) / CHUNK_CAPACITY;
     long[] ids = new long[chunks];
     for (int i = 0; i < chunks; i++) {
-      ids[i] = store.allocate(PageType.OVERFLOW);
+      ids[i] = pages.allocate(PageType.OVERFLOW);
     }
     for (int i = 0; i < chunks; i++) {
       int start = i * CHUNK_CAPACITY;
@@ -42,18 +42,18 @@ public final class OverflowChain {
       buf.putLong(0, i + 1 < chunks ? ids[i + 1] : 0L);
       buf.putInt(8, chunkLen);
       System.arraycopy(value, start, payload, HEADER_BYTES, chunkLen);
-      store.write(new Page(PageType.OVERFLOW, lsn, ids[i], payload));
+      pages.write(new Page(PageType.OVERFLOW, lsn, ids[i], payload));
     }
     return ids[0];
   }
 
-  /** Reads a value previously written by {@link #write(PageStore, long, byte[])}. */
-  public static byte[] read(PageStore store, long head, int totalLength) {
+  /** Reads a value previously written by {@link #write(BufferPool, long, byte[])}. */
+  public static byte[] read(BufferPool pages, long head, int totalLength) {
     byte[] out = new byte[totalLength];
     int written = 0;
     long cursor = head;
     while (cursor != 0L) {
-      Page page = store.read(cursor);
+      Page page = pages.read(cursor);
       if (page.type() != PageType.OVERFLOW) {
         throw new KvException(
             ErrorCode.CORRUPTED_PAGE,

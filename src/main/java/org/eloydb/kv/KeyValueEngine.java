@@ -13,6 +13,7 @@ import org.eloydb.kv.engine.EngineSnapshot;
 import org.eloydb.kv.engine.ListCursor;
 import org.eloydb.kv.internal.Bytes;
 import org.eloydb.kv.internal.Operation;
+import org.eloydb.kv.storage.BufferPool;
 import org.eloydb.kv.storage.MetaPayload;
 import org.eloydb.kv.storage.PageStore;
 import org.eloydb.kv.storage.WriteAheadLog;
@@ -48,6 +49,7 @@ public final class KeyValueEngine implements AutoCloseable {
   private final Clock clock;
   private final WriteAheadLog wal;
   private final PageStore store;
+  private final BufferPool bufferPool;
   private final CowBTree tree;
   private final Metrics metrics;
   private final AtomicInteger liveSnapshots = new AtomicInteger();
@@ -63,6 +65,7 @@ public final class KeyValueEngine implements AutoCloseable {
       Clock clock,
       WriteAheadLog wal,
       PageStore store,
+      BufferPool bufferPool,
       CowBTree tree,
       long rootPid,
       long commitTs,
@@ -71,6 +74,7 @@ public final class KeyValueEngine implements AutoCloseable {
     this.clock = clock;
     this.wal = wal;
     this.store = store;
+    this.bufferPool = bufferPool;
     this.tree = tree;
     this.rootPid = rootPid;
     this.commitTs = commitTs;
@@ -83,10 +87,6 @@ public final class KeyValueEngine implements AutoCloseable {
     metrics.gauge("tree.pages_allocated", store::allocatedPages);
     metrics.gauge("tree.height", this::computeTreeHeight);
     metrics.gauge("freelist.pages", () -> (long) store.freePageCount());
-    metrics.gauge("bufferpool.hits", () -> 0L);
-    metrics.gauge("bufferpool.misses", () -> 0L);
-    metrics.gauge("bufferpool.evictions", () -> 0L);
-    metrics.gauge("bufferpool.dirty_pages", () -> 0L);
   }
 
   /** Opens or creates an engine rooted at {@code directory}, replaying its WAL before returning. */
@@ -97,6 +97,7 @@ public final class KeyValueEngine implements AutoCloseable {
   static KeyValueEngine open(Path directory, Config config, Clock clock) {
     var metrics = new Metrics();
     PageStore store = PageStore.open(directory, metrics);
+    BufferPool bufferPool = new BufferPool(config, store, metrics);
     WriteAheadLog wal = WriteAheadLog.open(directory, metrics);
     WriteAheadLog.RecoveryResult recoveryResult = wal.recover();
 
@@ -109,13 +110,14 @@ public final class KeyValueEngine implements AutoCloseable {
       commitTs = meta.commitTs();
       startingLsn = commitTs;
     } else {
-      rootPid = CowBTree.createEmpty(store, 0L);
+      rootPid = CowBTree.createEmpty(bufferPool, 0L);
       commitTs = 0L;
       startingLsn = 0L;
+      bufferPool.flushDirtyPages();
       store.writeMeta(0L, rootPid, 0L);
       store.sync();
     }
-    CowBTree tree = new CowBTree(store, startingLsn);
+    CowBTree tree = new CowBTree(bufferPool, startingLsn);
 
     for (CommittedTransaction tx : recoveryResult.transactions()) {
       if (tx.commitTs() <= commitTs) {
@@ -130,10 +132,12 @@ public final class KeyValueEngine implements AutoCloseable {
       commitTs = Math.max(commitTs, recoveryResult.commitTs());
     }
     // Persist post-recovery state so a subsequent restart can skip the replay if the WAL is rolled.
+    bufferPool.flushDirtyPages();
     store.writeMeta(commitTs, rootPid, commitTs);
     store.sync();
 
-    return new KeyValueEngine(config, clock, wal, store, tree, rootPid, commitTs, metrics);
+    return new KeyValueEngine(
+        config, clock, wal, store, bufferPool, tree, rootPid, commitTs, metrics);
   }
 
   /**
@@ -177,18 +181,17 @@ public final class KeyValueEngine implements AutoCloseable {
   /** Performs lightweight consistency checks over the current on-disk state. */
   public synchronized VerifyResult verify() {
     ensureOpen();
-    long reachable = 0;
     var counter = new long[1];
     tree.walkAllPages(rootPid, pid -> counter[0]++);
-    reachable = counter[0];
     boolean walOk = wal.verify().ok();
-    return new VerifyResult(reachable, liveSnapshots.get(), walOk);
+    return new VerifyResult(counter[0], liveSnapshots.get(), walOk);
   }
 
   @Override
   public synchronized void close() {
     if (closed.compareAndSet(false, true)) {
       try {
+        bufferPool.close();
         wal.close();
       } finally {
         store.close();
@@ -244,6 +247,7 @@ public final class KeyValueEngine implements AutoCloseable {
     }
     rootPid = workingRoot;
     commitTs = newCommitTs;
+    bufferPool.flushDirtyPages();
     store.writeMeta(commitTs, rootPid, commitTs);
     store.sync();
     writerActive = false;
@@ -317,7 +321,7 @@ public final class KeyValueEngine implements AutoCloseable {
     long pid = rootPid;
     long height = 0;
     while (true) {
-      var page = store.read(pid);
+      var page = bufferPool.read(pid);
       height++;
       if (page.type() == org.eloydb.kv.storage.PageType.LEAF) {
         return height;

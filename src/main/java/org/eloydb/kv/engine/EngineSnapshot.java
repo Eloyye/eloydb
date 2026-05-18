@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -87,8 +88,7 @@ public final class EngineSnapshot implements Snapshot {
           ? Optional.empty()
           : Optional.of(java.util.Arrays.copyOf(value, value.length));
     }
-    assert tree != null;
-    return tree.get(rootPid, key);
+    return Objects.requireNonNull(tree).get(rootPid, key);
   }
 
   @Override
@@ -106,8 +106,7 @@ public final class EngineSnapshot implements Snapshot {
       }
       return new ListCursor(rows);
     }
-    assert tree != null;
-    return new ListCursor(tree.scan(rootPid, startInclusive, endExclusive));
+    return new ListCursor(Objects.requireNonNull(tree).scan(rootPid, startInclusive, endExclusive));
   }
 
   @Override

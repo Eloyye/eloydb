@@ -3,7 +3,7 @@
 Status as of this review: M1 now has a page-backed Copy-on-Write B+ tree, a single-file
 `PageStore` with a persisted free list, overflow page chains for large values, and slotted
 leaf/internal pages. The in-memory `TreeMap` engine state has been removed. WAL, MVCC reclamation,
-buffer pool, and most of the M1 acceptance criteria still remain open.
+zero-copy page decoding, and most of the M1 acceptance criteria still remain open.
 
 ## Changelog For This Pass
 
@@ -27,10 +27,14 @@ Date: 2026-05-18.
   either `tree.scan(...)` or an overlay submap.
 - `Metrics` gains a `freelist.pages` gauge and re-uses `tree.pages_allocated` /
   `tree.pages_freed` as real counters incremented by `PageStore`.
+- Added `BufferPool` and `PageHandle`; `KeyValueEngine`, `CowBTree`, and overflow chains now route
+  page reads/writes through the buffer pool. Dirty frames flush before meta-root publication and
+  on close.
 
-Tests: `mvn test` is green across 19 JUnit tests (12 existing + 7 new). The 5,000-op randomised
-oracle in `CowBTreeTest` plus the 1,000-entry split test in `manyInsertsForceSplitsAndStillRetrievable`
-exercise leaf splits, internal splits, and a root split.
+Tests: `mvn verify` is green across 23 JUnit tests. The 5,000-op randomised oracle in
+`CowBTreeTest` plus the 1,000-entry split test in `manyInsertsForceSplitsAndStillRetrievable`
+exercise leaf splits, internal splits, and a root split; `BufferPoolTest` covers pinning, CLOCK
+eviction, dirty flush, and hit/miss metrics.
 
 ## Known Blockers Carried Forward
 
@@ -64,6 +68,8 @@ exercise leaf splits, internal splits, and a root split.
   validation.
 - Slotted leaf/internal page codecs, page-backed CoW B+ tree, overflow chains, and a free-list
   enabled `PageStore` (see the "Core Storage Status" section above).
+- Sharded off-heap `BufferPool` with shard-local hash maps, CLOCK rings, pin/unpin handles, dirty
+  tracking, `newPage(type)`, `flushDirtyPages()`, and real buffer-pool metrics.
 - Order-preserving encoders for several primitive key types.
 - Basic CLI commands: `init`, `put`, `get`, `delete`, `scan`, `snapshot`, `stats`, and `verify`.
 - JUnit coverage for basic recovery, snapshot stability, torn WAL tail handling, page CRC
@@ -103,16 +109,28 @@ Still **not** done in this section:
   monotonically.
 - **Live-page verification in `eloydb-kv verify`.** `verify` now walks the tree and counts reachable
   pages but does not yet diff against the free list or detect leaks.
-- **Off-heap-only hot path.** Reads still copy page bytes onto the heap (`Page.payload()` returns a
-  `byte[]`). The IO itself goes through `MemorySegment`, but downstream decoders consume `byte[]`.
-  Eliminating per-`get` allocations needs the buffer pool described in the next section.
+- **Off-heap-only hot path.** The buffer pool stores pages in direct buffers, but reads still decode
+  a `Page` whose `payload()` returns a `byte[]`. Downstream slotted-page decoders also consume
+  `byte[]`. Eliminating per-`get` allocations needs zero-copy decoding from pinned frames.
 
-## Buffer Pool Still Unimplemented
+## Buffer Pool Status
 
-- Add the sharded off-heap buffer pool described by M1: shard-local hash tables, CLOCK rings, pin/unpin handles, dirty tracking, and `newPage(type)`.
-- Ensure eviction never selects pinned pages.
-- Wire dirty page flushing through WAL/checkpoint rules.
-- Replace placeholder buffer-pool metrics with real hit, miss, eviction, and dirty-page values.
+Landed in this change:
+
+- Sharded off-heap buffer pool with shard-local hash tables, CLOCK rings, pin/unpin handles, dirty
+  tracking, and `newPage(type)`.
+- Eviction skips pinned pages and fails with `INSUFFICIENT_RESOURCES` if every frame in the shard
+  is pinned.
+- `KeyValueEngine`, `CowBTree`, and `OverflowChain` now use the buffer pool. Commits flush dirty
+  buffer-pool pages before rewriting the meta root and fsyncing `store.0001`.
+- Real `bufferpool.hits`, `bufferpool.misses`, `bufferpool.evictions`, and
+  `bufferpool.dirty_pages` metrics are registered by `BufferPool`.
+
+Still open:
+
+- Full checkpoint/WAL page-image integration. The current commit path flushes dirty pages before
+  root publication, but M1's `PAGE_IMAGE`, `ROOT_PUBLISH`, and checkpoint LSN rules are not in
+  place yet.
 - Validate warm hot-set and cold-scan behavior against the acceptance targets.
 
 ## WAL, Checkpointing, And Recovery Gaps

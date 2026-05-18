@@ -9,8 +9,11 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Random;
 import java.util.TreeMap;
+import org.eloydb.kv.Config;
 import org.eloydb.kv.KeyValue;
 import org.eloydb.kv.Metrics;
+import org.eloydb.kv.storage.BufferPool;
+import org.eloydb.kv.storage.Page;
 import org.eloydb.kv.storage.PageStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -20,9 +23,11 @@ final class CowBTreeTest {
 
   @Test
   void putGetDeleteSinglePage() {
-    try (PageStore store = PageStore.open(tempDir, new Metrics())) {
-      long root = CowBTree.createEmpty(store, 0L);
-      CowBTree tree = new CowBTree(store, 0L);
+    Metrics metrics = new Metrics();
+    try (PageStore store = PageStore.open(tempDir, metrics);
+        BufferPool pages = new BufferPool(testConfig(), store, metrics)) {
+      long root = CowBTree.createEmpty(pages, 0L);
+      CowBTree tree = new CowBTree(pages, 0L);
 
       root =
           tree.put(
@@ -51,9 +56,11 @@ final class CowBTreeTest {
 
   @Test
   void manyInsertsForceSplitsAndStillRetrievable() {
-    try (PageStore store = PageStore.open(tempDir, new Metrics())) {
-      long root = CowBTree.createEmpty(store, 0L);
-      CowBTree tree = new CowBTree(store, 0L);
+    Metrics metrics = new Metrics();
+    try (PageStore store = PageStore.open(tempDir, metrics);
+        BufferPool pages = new BufferPool(testConfig(), store, metrics)) {
+      long root = CowBTree.createEmpty(pages, 0L);
+      CowBTree tree = new CowBTree(pages, 0L);
 
       var oracle = new TreeMap<String, String>();
       // 1000 entries with ~500-byte values forces multiple splits.
@@ -80,9 +87,11 @@ final class CowBTreeTest {
 
   @Test
   void overflowValuesRoundTrip() {
-    try (PageStore store = PageStore.open(tempDir, new Metrics())) {
-      long root = CowBTree.createEmpty(store, 0L);
-      CowBTree tree = new CowBTree(store, 0L);
+    Metrics metrics = new Metrics();
+    try (PageStore store = PageStore.open(tempDir, metrics);
+        BufferPool pages = new BufferPool(testConfig(), store, metrics)) {
+      long root = CowBTree.createEmpty(pages, 0L);
+      CowBTree tree = new CowBTree(pages, 0L);
 
       byte[] huge = new byte[40_000];
       new Random(42).nextBytes(huge);
@@ -95,9 +104,11 @@ final class CowBTreeTest {
 
   @Test
   void randomizedOracle() {
-    try (PageStore store = PageStore.open(tempDir, new Metrics())) {
-      long root = CowBTree.createEmpty(store, 0L);
-      CowBTree tree = new CowBTree(store, 0L);
+    Metrics metrics = new Metrics();
+    try (PageStore store = PageStore.open(tempDir, metrics);
+        BufferPool pages = new BufferPool(testConfig(), store, metrics)) {
+      long root = CowBTree.createEmpty(pages, 0L);
+      CowBTree tree = new CowBTree(pages, 0L);
 
       var random = new Random(7);
       var oracle = new TreeMap<String, String>();
@@ -125,5 +136,18 @@ final class CowBTreeTest {
                 v -> assertThat(new String(v, StandardCharsets.UTF_8)).isEqualTo(entry.getValue()));
       }
     }
+  }
+
+  private static Config testConfig() {
+    return new Config(
+        Page.PAGE_SIZE,
+        64L * Page.PAGE_SIZE,
+        4,
+        64L * 1024L * 1024L,
+        java.time.Duration.ofMillis(2),
+        java.time.Duration.ofSeconds(30),
+        256L * 1024L * 1024L,
+        java.time.Duration.ofHours(1),
+        java.time.Duration.ofSeconds(5));
   }
 }
