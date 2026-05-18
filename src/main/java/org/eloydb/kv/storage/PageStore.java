@@ -4,21 +4,17 @@ import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import org.eloydb.kv.ErrorCode;
 import org.eloydb.kv.KvException;
 import org.eloydb.kv.Metrics;
@@ -48,21 +44,15 @@ import org.jspecify.annotations.Nullable;
 public final class PageStore implements AutoCloseable {
   public static final long META_PAGE_ID = 0L;
 
-  private static final int FREELIST_HEADER_BYTES = 8 /* next */ + 4 /* count */;
-  private static final int FREELIST_ENTRY_BYTES = 8;
-  private static final int FREELIST_CAPACITY =
-      (SlottedPage.PAYLOAD_BYTES - FREELIST_HEADER_BYTES) / FREELIST_ENTRY_BYTES;
-
   private final Path path;
   private final FileChannel channel;
   private final Arena arena;
   private final Metrics metrics;
   private final boolean debugVerifyPublished;
   private final Map<Long, byte[]> publishedHashes;
+  private final FreeList freeList;
 
   private long nextAllocPid;
-  private long freelistHead;
-  private int freePageCount;
 
   private PageStore(
       Path path,
@@ -80,8 +70,9 @@ public final class PageStore implements AutoCloseable {
     this.debugVerifyPublished = debugVerifyPublished;
     this.publishedHashes = debugVerifyPublished ? new HashMap<>() : Map.of();
     this.nextAllocPid = nextAllocPid;
-    this.freelistHead = freelistHead;
-    this.freePageCount = freePageCount;
+    this.freeList =
+        new FreeList(
+            freelistHead, freePageCount, this::read, this::write, this::allocateFreelistPage);
   }
 
   /** Opens or creates the store at {@code directory/store.0001}, bootstrapping the meta page. */
@@ -139,17 +130,17 @@ public final class PageStore implements AutoCloseable {
   }
 
   public long freelistHead() {
-    return freelistHead;
+    return freeList.headPid();
   }
 
   public int freePageCount() {
-    return freePageCount;
+    return freeList.pageCount();
   }
 
   /** Allocates a fresh page id, reusing the free list when possible. */
   public long allocate(PageType type) {
-    if (freelistHead != 0L && type != PageType.FREELIST) {
-      long pid = popFreelistEntry();
+    if (freeList.canPopFor(type)) {
+      long pid = freeList.pop();
       metrics.increment("tree.pages_allocated");
       return pid;
     }
@@ -163,7 +154,7 @@ public final class PageStore implements AutoCloseable {
     if (pageId == META_PAGE_ID) {
       throw new IllegalArgumentException("cannot free meta page");
     }
-    pushFreelistEntry(pageId);
+    freeList.push(pageId);
     if (debugVerifyPublished) {
       publishedHashes.remove(pageId);
     }
@@ -258,7 +249,7 @@ public final class PageStore implements AutoCloseable {
   /** Writes a meta page with the given LSN and the current free-list bookkeeping. */
   public void writeMeta(long lsn, long rootPid, long commitTs) {
     MetaPayload payload =
-        new MetaPayload(rootPid, commitTs, nextAllocPid, freelistHead, freePageCount);
+        new MetaPayload(rootPid, commitTs, nextAllocPid, freeList.headPid(), freeList.pageCount());
     Page page = new Page(PageType.META, lsn, META_PAGE_ID, payload.encode());
     write(page);
   }
@@ -274,87 +265,13 @@ public final class PageStore implements AutoCloseable {
     }
   }
 
-  private long popFreelistEntry() {
-    Page head = read(freelistHead);
-    if (head.type() != PageType.FREELIST) {
-      throw new KvException(
-          ErrorCode.CORRUPTED_PAGE, "free-list page " + freelistHead + " has wrong type");
-    }
-    byte[] payload = head.payload();
-    ByteBuffer buf = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN);
-    long next = buf.getLong(0);
-    int count = buf.getInt(8);
-    if (count <= 0) {
-      // Empty page - reuse it directly and unlink it.
-      long reused = freelistHead;
-      freelistHead = next;
-      freePageCount = Math.max(0, freePageCount - 1);
-      return reused;
-    }
-    int slot = count - 1;
-    long pid = buf.getLong(FREELIST_HEADER_BYTES + slot * FREELIST_ENTRY_BYTES);
-    buf.putInt(8, count - 1);
-    freePageCount = Math.max(0, freePageCount - 1);
-    Page rewritten = new Page(PageType.FREELIST, head.lsn(), freelistHead, payload);
-    write(rewritten);
-    return pid;
-  }
-
-  private void pushFreelistEntry(long pageId) {
-    if (freelistHead == 0L) {
-      long headPid = nextAllocPid++;
-      byte[] payload = new byte[SlottedPage.PAYLOAD_BYTES];
-      ByteBuffer buf = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN);
-      buf.putLong(0, 0L);
-      buf.putInt(8, 1);
-      buf.putLong(FREELIST_HEADER_BYTES, pageId);
-      write(new Page(PageType.FREELIST, 0L, headPid, payload));
-      freelistHead = headPid;
-      freePageCount++;
-      return;
-    }
-    Page head = read(freelistHead);
-    byte[] payload = head.payload();
-    ByteBuffer buf = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN);
-    int count = buf.getInt(8);
-    if (count >= FREELIST_CAPACITY) {
-      long newHeadPid = nextAllocPid++;
-      byte[] newPayload = new byte[SlottedPage.PAYLOAD_BYTES];
-      ByteBuffer nbuf = ByteBuffer.wrap(newPayload).order(ByteOrder.BIG_ENDIAN);
-      nbuf.putLong(0, freelistHead);
-      nbuf.putInt(8, 1);
-      nbuf.putLong(FREELIST_HEADER_BYTES, pageId);
-      write(new Page(PageType.FREELIST, 0L, newHeadPid, newPayload));
-      freelistHead = newHeadPid;
-      freePageCount++;
-      return;
-    }
-    buf.putLong(FREELIST_HEADER_BYTES + count * FREELIST_ENTRY_BYTES, pageId);
-    buf.putInt(8, count + 1);
-    write(new Page(PageType.FREELIST, head.lsn(), freelistHead, payload));
-    freePageCount++;
-  }
-
   /** Walks the persisted free-list and returns every page id it lists. */
   public List<Long> freelistContents() {
-    List<Long> ids = new ArrayList<>();
-    Set<Long> seen = new HashSet<>();
-    long cursor = freelistHead;
-    while (cursor != 0L) {
-      if (!seen.add(cursor)) {
-        throw new KvException(ErrorCode.CORRUPTED_PAGE, "free-list cycle at " + cursor);
-      }
-      Page page = read(cursor);
-      byte[] payload = page.payload();
-      ByteBuffer buf = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN);
-      long next = buf.getLong(0);
-      int count = buf.getInt(8);
-      for (int i = 0; i < count; i++) {
-        ids.add(buf.getLong(FREELIST_HEADER_BYTES + i * FREELIST_ENTRY_BYTES));
-      }
-      cursor = next;
-    }
-    return ids;
+    return freeList.contents();
+  }
+
+  private long allocateFreelistPage() {
+    return nextAllocPid++;
   }
 
   private static MetaPayload readMetaInternal(FileChannel channel, Arena arena) throws IOException {
